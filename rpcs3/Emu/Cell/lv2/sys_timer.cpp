@@ -12,6 +12,7 @@
 #include "sys_event.h"
 #include "sys_process.h"
 
+#include <chrono>
 #include <thread>
 #include <deque>
 
@@ -483,7 +484,36 @@ error_code sys_timer_usleep(ppu_thread& ppu, u64 sleep_time)
 	}
 	else
 	{
-		std::this_thread::yield();
+		// usleep(0) is how many games poll: a loop that checks a flag an SPU job or another thread
+		// sets, giving the PPU away between checks. On the PS3 that hands the core to the other
+		// hardware thread. Here it is a sched_yield that, with free cores, returns at once, so the
+		// loop spins through the kernel: LittleBigPlanet's main thread made ~114,000 of these calls
+		// a second in gameplay, and the context switching alone was 7% of the process.
+		//
+		// A short run of polls still yields exactly as before, so a flag that is about to flip is
+		// seen as fast as ever. Once the same thread has been polling back to back for 50 us, each
+		// poll sleeps 20 us instead: the thread leaves the CPU, and a flag that flips is seen at most
+		// 20 us late. Any gap between polls (the guest doing real work) starts a fresh run.
+		static thread_local u64 s_poll_run_start = 0;
+		static thread_local u64 s_poll_last = 0;
+
+		const u64 now = get_system_time();
+
+		if (now - s_poll_last > 50)
+		{
+			s_poll_run_start = now;
+		}
+
+		if (now - s_poll_run_start < 50)
+		{
+			std::this_thread::yield();
+		}
+		else
+		{
+			std::this_thread::sleep_for(std::chrono::microseconds(20));
+		}
+
+		s_poll_last = get_system_time();
 	}
 
 	return CELL_OK;

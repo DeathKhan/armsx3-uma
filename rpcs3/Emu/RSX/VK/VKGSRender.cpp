@@ -1317,9 +1317,17 @@ bool VKGSRender::on_vram_exhausted(rsx::problem_severity severity)
 	bool surface_cache_relieved = false;
 	const auto mem_info = m_device->get_memory_mapping();
 
+	// Unified memory: every heap the device reports is device-local. Spilling moves render targets
+	// from one memory type to another in the same RAM, so it frees nothing and costs a copy out and
+	// a copy back. The type comparison below does not catch this on Adreno, where device-local and
+	// host-coherent are different types on the one heap.
+	const bool unified_memory = std::all_of(mem_info.heaps.begin(), mem_info.heaps.end(),
+		[](const vk::memory_heap_info& heap) { return (heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0; });
+
 	// Check if we need to spill
 	if (severity >= rsx::problem_severity::fatal &&                // Only spill for fatal errors
 		mem_info.device_local != mem_info.host_visible_coherent && // Do not spill if it is an IGP, there is nowhere to spill to
+		!unified_memory &&
 		resources && resources->surface_cache.is_overallocated())  // Surface cache must be over-allocated by the design quota
 	{
 		// Queue a VRAM spill operation.

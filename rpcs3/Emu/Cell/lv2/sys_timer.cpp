@@ -491,9 +491,14 @@ error_code sys_timer_usleep(ppu_thread& ppu, u64 sleep_time)
 		// a second in gameplay, and the context switching alone was 7% of the process.
 		//
 		// A short run of polls still yields exactly as before, so a flag that is about to flip is
-		// seen as fast as ever. Once the same thread has been polling back to back for 50 us, each
+		// seen as fast as ever. Once the same thread has been polling back to back for 300 us, each
 		// poll sleeps 20 us instead: the thread leaves the CPU, and a flag that flips is seen at most
-		// 20 us late. Any gap between polls (the guest doing real work) starts a fresh run.
+		// 20 us late (plus the core's wake-up). Any gap between polls (the guest doing real work)
+		// starts a fresh run.
+		//
+		// The window is not 50 us: with that, LittleBigPlanet held 30 fps but presented 3-11 late
+		// frames per 74 s run instead of none. A frame there waits on a chain of short SPU jobs, and
+		// a sleep per job let the core drop into deep idle each time; the wake-ups added up.
 		static thread_local u64 s_poll_run_start = 0;
 		static thread_local u64 s_poll_last = 0;
 
@@ -504,7 +509,7 @@ error_code sys_timer_usleep(ppu_thread& ppu, u64 sleep_time)
 			s_poll_run_start = now;
 		}
 
-		if (now - s_poll_run_start < 50)
+		if (now - s_poll_run_start < 300)
 		{
 			std::this_thread::yield();
 		}

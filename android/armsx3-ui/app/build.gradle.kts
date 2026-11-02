@@ -28,7 +28,8 @@ android {
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.armsx3"
+        // ARMSX3 UMA installs next to the official app (com.armsx3).
+        applicationId = "com.armsx3.uma"
         // Set per variant by android/build-variants.sh: 33 for the A13 build (NDK 28), 35 for
         // the A15 build (NDK 29). The core is compiled against the matching API, so these must
         // agree -- an APK that installs below its core's target is a dlopen failure at boot.
@@ -47,7 +48,8 @@ android {
         // permissions have moved into the github flavor's manifest, so the play bundle does not
         // declare them at all.
         buildConfigField("boolean", "STORAGE_ALL_FILES", "true")
-        buildConfigField("boolean", "IN_APP_UPDATER", "true")
+        // Off: the updater installs official ARMSX3 releases, which are a different app.
+        buildConfigField("boolean", "IN_APP_UPDATER", "false")
         buildConfigField("boolean", "FRAME_GENERATION", "true")
 
         // The URI scheme Discord sign-in returns through. github keeps the SDK's default,

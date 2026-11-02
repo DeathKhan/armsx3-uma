@@ -4407,31 +4407,17 @@ public:
 				}
 				else if (const std::string& obj_cache = m_spurt->get_obj_cache_path(); !obj_cache.empty())
 				{
-					// DISABLED: cached SPU objects are not safe to reuse across processes on ARM64.
+					// Persistent object cache, the same as the x64 branch below. It was off here because
+					// cached objects carried absolute host addresses (g_timebase_offs and vm::g_pages,
+					// baked as movz/movk immediates with no relocation) and faulted in the next process
+					// once ASLR moved those mappings. Those reads now go through host_global(), which
+					// names the symbol and lets the engine resolve it at link time, so an object is as
+					// valid in a later process as in the one that compiled it. The cache version was
+					// bumped with this change to retire the old objects.
 					//
-					// This branch used to call the cache-less try_add overload, so ARM64 never wrote
-					// SPU objects at all and recompiled every session. Passing obj_cache here made it
-					// write them, which cut a cold boot from minutes to seconds -- and started
-					// crashing at roughly twelve seconds into boot, in CellSpursKernel0, always at
-					// the same host address:
-					//
-					//     insn=0xb940012b  ->  ldr w11, [x9]     x9 = 0x78ba91f798
-					//
-					// x9 is built by movz/movk immediates in the cached object itself, and
-					// readelf shows NO relocation covering those instructions. The relocations that
-					// are there -- .rodata.cst16 page-relative, CALL26 to spu_escape/spu_dispatch --
-					// all resolve on load; this one cannot, because nothing marks it as an address.
-					// So the object carries an absolute host pointer captured when it was compiled,
-					// which is why the fault address is byte-identical in every process while the
-					// mappings around it move with ASLR, and why it lands in whatever unrelated
-					// mapping now occupies that spot.
-					//
-					// Fixing the one constant would not make this safe. Any address the recompiler
-					// bakes into IR has the same problem -- g_timebase_offs is baked the same way in
-					// two more places -- so the cache is only sound once every such site goes through
-					// a relocatable symbol instead of IntToPtr(getInt64(...)). Until then, correctness
-					// over the boot time: recompile per session, as ARM64 always did before.
-					added = m_jit.try_add(std::move(_module), llvm_error);
+					// What it buys: the per-session recompile. LittleBigPlanet rebuilt 4,860 programs on
+					// every boot, 32 s of all-core LLVM at the start of each session.
+					added = m_jit.try_add(std::move(_module), obj_cache, llvm_error);
 				}
 				else
 				{
@@ -5372,7 +5358,7 @@ public:
 #if defined(ARCH_X64) || defined(ARCH_ARM64)
 			if (utils::get_tsc_freq() && !(g_cfg.core.spu_loop_detection) && (g_cfg.core.clocks_scale == 100))
 			{
-				const auto timebase_offs = m_ir->CreateLoad(get_type<u64>(), m_ir->CreateIntToPtr(m_ir->getInt64(reinterpret_cast<u64>(&g_timebase_offs)), get_type<u64*>()));
+				const auto timebase_offs = m_ir->CreateLoad(get_type<u64>(), host_global("__armsx3_timebase_offs", get_type<u64>(), &g_timebase_offs));
 				const auto timestamp = m_ir->CreateLoad(get_type<u64>(), spu_ptr(&spu_thread::ch_dec_start_timestamp));
 				const auto dec_value = m_ir->CreateLoad(get_type<u32>(), spu_ptr(&spu_thread::ch_dec_value));
 				// Upstream 61a260482 widened this path to ARM64 using llvm.readcyclecounter, but on
@@ -6003,8 +5989,7 @@ public:
 							? (vm::page_readable | vm::page_allocated)
 							: (vm::page_writable | vm::page_allocated);
 
-						const auto pages = m_ir->CreateIntToPtr(
-							m_ir->getInt64(reinterpret_cast<u64>(vm::g_pages.data())), get_type<u8*>());
+						const auto pages = host_global("__armsx3_vm_pages", get_type<u8>(), vm::g_pages.data());
 
 						const auto flags_at = [&](llvm::Value* addr) -> llvm::Value*
 						{
@@ -6284,7 +6269,7 @@ public:
 #if defined(ARCH_X64) || defined(ARCH_ARM64)
 			if (utils::get_tsc_freq() && !(g_cfg.core.spu_loop_detection) && (g_cfg.core.clocks_scale == 100))
 			{
-				const auto timebase_offs = m_ir->CreateLoad(get_type<u64>(), m_ir->CreateIntToPtr(m_ir->getInt64(reinterpret_cast<u64>(&g_timebase_offs)), get_type<u64*>()));
+				const auto timebase_offs = m_ir->CreateLoad(get_type<u64>(), host_global("__armsx3_timebase_offs", get_type<u64>(), &g_timebase_offs));
 				// Upstream 61a260482 widened this path to ARM64 using llvm.readcyclecounter, but on
 				// AArch64 that lowers to MRS PMCCNTR_EL0 -- the performance counter, which userspace
 				// cannot read on Android and which runs at the DVFS-varying core clock. The maths
@@ -6635,8 +6620,7 @@ public:
 			spu_log.notice("Killzone 3: KD-tree traversal guard compiled in at LS 0x21238 (%s)", Emu.GetTitleID());
 
 			const auto ea = eval(extract(get_vr(op.rt), 3)).value;
-			const auto pages = m_ir->CreateIntToPtr(
-				m_ir->getInt64(reinterpret_cast<u64>(vm::g_pages.data())), get_type<u8*>());
+			const auto pages = host_global("__armsx3_vm_pages", get_type<u8>(), vm::g_pages.data());
 			const auto idx = m_ir->CreateLShr(m_ir->CreateZExt(ea, get_type<u64>()), 12);
 			const auto flags = m_ir->CreateLoad(get_type<u8>(), m_ir->CreateGEP(get_type<u8>(), pages, idx));
 			const auto backed = m_ir->CreateICmpNE(
@@ -7018,6 +7002,18 @@ public:
 		const auto m = bitcast<bool[16]>(trunc<u16>(v));
 		set_vr(op.rt, sext<s8[16]>(m));
 #endif
+	}
+
+	// A host object the generated code reads, as a named external symbol rather than an
+	// address baked into the instruction stream. The engine resolves the name when the object
+	// is linked, in this process or in a later one that loads it from the object cache; an
+	// address written as movz/movk immediates has no relocation and is only valid in the
+	// process that compiled it. All four such reads in this recompiler go through here, which
+	// is what makes the ARM64 object cache sound (see the cache branch in compile()).
+	llvm::Value* host_global(std::string_view name, llvm::Type* type, const void* addr)
+	{
+		m_engine->updateGlobalMapping({name.data(), name.size()}, reinterpret_cast<uptr>(addr));
+		return m_module->getOrInsertGlobal({name.data(), name.size()}, type);
 	}
 
 	template <typename TA>

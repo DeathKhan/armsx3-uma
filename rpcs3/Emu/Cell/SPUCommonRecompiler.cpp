@@ -1774,8 +1774,14 @@ spu_runtime::spu_runtime()
 		// absolute host address baked in as movz/movk immediates with no relocation covering them,
 		// so they fault as soon as a later process maps things elsewhere. Disabling the write is
 		// not enough on its own -- what is already on disk would still be read back.
-		constexpr u32 SPU_OBJ_CACHE_VERSION = 3;
-		constexpr usz SPU_OBJ_CACHE_MAX_FILES = 12000;
+		// v4: the host addresses that made v3 unsafe are named symbols now (host_global in the
+		// LLVM recompiler), and the ARM64 branch writes objects again.
+		constexpr u32 SPU_OBJ_CACHE_VERSION = 4;
+		// Storage safety valve only. Over the cap the directory is wiped and rebuilt, which with the
+		// ARM64 cache live means a title above it pays the full recompile AND the object write on
+		// every boot -- worse than no cache at all. Measured: LittleBigPlanet's 4,861 objects take
+		// 21 MB (about 4.4 KB each, gzip'd), so 60,000 is roughly 260 MB for the largest titles.
+		constexpr usz SPU_OBJ_CACHE_MAX_FILES = 60000;
 
 		sha1_context ctx;
 		u8 key[20];

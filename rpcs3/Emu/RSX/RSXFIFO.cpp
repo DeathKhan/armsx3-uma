@@ -3,6 +3,7 @@
 #include "Emu/System.h"
 #include "RSXFIFO.h"
 #include "RSXThread.h"
+#include "Common/paced_wait.h"
 #include "Capture/rsx_capture.h"
 #include "Core/RSXReservationLock.hpp"
 #include "Emu/Memory/vm_reservation.h"
@@ -884,13 +885,17 @@ namespace rsx
 
 				// Spin budget for the idle wait below. Reset whenever a fresh idle period starts, so
 				// each drain gets its own short hot window before parking.
-				static thread_local u32 s_fifo_idle_spins = 0;
+#if defined(ARCH_ARM64)
+				static thread_local rsx::paced_wait s_fifo_idle_pacer;
+#endif
 
 				if (performance_counters.state == FIFO::state::running)
 				{
 					performance_counters.FIFO_idle_timestamp = get_system_time();
 					performance_counters.state = FIFO::state::empty;
-					s_fifo_idle_spins = 0;
+#if defined(ARCH_ARM64)
+					s_fifo_idle_pacer.reset();
+#endif
 				}
 				else
 				{
@@ -937,23 +942,11 @@ namespace rsx
 					RSX_PROF_SCOPE(idle_fifo);
 
 #if defined(ARCH_ARM64)
-					if (s_fifo_idle_spins < 8)
-					{
-						s_fifo_idle_spins++;
-						utils::pause();
-					}
-					else if (utils::has_wfe_event_stream())
-					{
-						utils::wait_for_event();
-					}
-					else
-					{
-						// Without the event stream a monitor-less WFE has no bounded
-						// wake, so a park here could sleep through the guest's PUT
-						// advance until an unrelated interrupt. Yield instead - the
-						// pre-WFE behavior of this path.
-						std::this_thread::yield();
-					}
+					// UPDATE 2: the WFE park keeps the thread on the CPU between event-stream ticks,
+					// which the scheduler and governor read as a fully busy core at top clock (the
+					// same failure measured in nv406e::semaphore_acquire). paced_wait spins briefly,
+					// then sleeps for real, at most 0.2 ms at a time once the ring has been empty a while.
+					s_fifo_idle_pacer.wait();
 #else
 					std::this_thread::yield();
 #endif

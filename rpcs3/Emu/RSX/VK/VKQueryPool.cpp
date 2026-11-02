@@ -10,6 +10,7 @@
 #include <chrono>
 #include <thread>
 #include "VKGSRender.h"
+#include "Emu/RSX/Common/paced_wait.h"
 
 namespace vk
 {
@@ -203,6 +204,10 @@ namespace vk
 			const auto wait_started = std::chrono::steady_clock::now();
 			bool warned = false;
 
+#ifdef __ANDROID__
+			rsx::paced_wait pacer;
+#endif
+
 			for (u32 spins = 0; !query_info.ready; spins++)
 			{
 				// Emulation is going away; a driver that never answers must not also wedge
@@ -213,7 +218,12 @@ namespace vk
 					break;
 				}
 
+#ifdef __ANDROID__
+				// Iterations sleep once past the spin, so check the clock far more often.
+				if ((spins & 0xff) == 0xff)
+#else
 				if ((spins & 0xffff) == 0xffff)
+#endif
 				{
 					const auto waited = std::chrono::steady_clock::now() - wait_started;
 
@@ -254,14 +264,10 @@ namespace vk
 				//
 				// The short spin first keeps the fast case fast, since a result that is
 				// nearly ready still returns without a scheduler round trip.
-				if (spins < 64)
-				{
-					utils::pause();
-				}
-				else
-				{
-					std::this_thread::yield();
-				}
+				// UPDATE: yield was the wrong hand-back. With more runnable threads than cores it is
+				// usually rescheduled at once, so it is a syscall per iteration that keeps the core
+				// busy. paced_wait spins for the fast case, then sleeps in the kernel.
+				pacer.wait();
 #else
 				utils::pause();
 #endif

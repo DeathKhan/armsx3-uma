@@ -4,6 +4,7 @@
 
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/RSX/rsx_profiler.h"
+#include "Emu/RSX/Common/paced_wait.h"
 #include "util/sysinfo.hpp"
 
 #include "Emu/system_config.h"
@@ -86,11 +87,7 @@ namespace rsx
 			}
 
 #if defined(ARCH_ARM64)
-			u64 spin_budget = 0;
-			// Whether wait_for_event() below has a bounded wake on this kernel.
-			// Without it the tiered wait degrades to a timed sleep rather than
-			// re-exposing the unpaced spin (or an unbounded park).
-			const bool has_event_stream = utils::has_wfe_event_stream();
+			rsx::paced_wait pacer;
 #endif
 
 			while (true)
@@ -194,51 +191,17 @@ namespace rsx
 				RSX_PROF_SCOPE(idle_sema);
 
 #if defined(ARCH_ARM64)
-				// The armed one-shot wait below does not park on every core: on Oryon
-				// (Snapdragon 8 Elite class) WFE returns immediately while the exclusive
-				// monitor is armed, so this loop ran at tens of millions of iterations per
-				// second instead of waiting. Give the armed form a short window first - on
-				// cores where it parks it keeps its instant wake-on-write, and where it
-				// does not it acts as a brief spin that still catches short waits - then
-				// interleave a paced wait: the event-stream park when the kernel provides
-				// the stream, a timed sleep when it does not. The armed one-shot still
-				// runs each iteration afterwards, so on cores where it parks, a store
-				// wakes the second half of every post-budget iteration promptly; during
-				// the paced half a store is only seen at the next tick, so post-budget
-				// wake latency on such cores is bounded by (not free of) the pacing
-				// period.
-				if (++spin_budget > 500)
-				{
-					if (has_event_stream)
-					{
-						utils::wait_for_event();
-					}
-					else
-					{
-						// No event stream: neither WFE form has a wake this code can
-						// bound, so pace with the scheduler instead of spinning or
-						// parking blind. Also keeps the timeout and service polls
-						// above running at a bounded cadence.
-						std::this_thread::sleep_for(std::chrono::microseconds(100));
-					}
-				}
-
-				if (!aligned)
-				{
-					// Exclusive loads fault on unaligned addresses; rely on the
-					// pacing above plus the plain re-read at the loop top.
-					utils::pause();
-					continue;
-				}
-#endif
-				// On x86 with waitpkg/mwaitx this waits on the address, bounded by
-				// the timeout; without those extensions it degrades to a yield. On
-				// ARM the timeout is ignored: the wait ends on a write to the armed
-				// cache line or an event-stream tick on cores where the armed WFE
-				// parks, and returns immediately on cores where it does not
-				// (measured on Oryon), where the paced wait above sets the loop's
-				// cadence instead.
+				// A short spin, then real sleeps (see paced_wait). The armed WFE this replaces did not
+				// park on Oryon, and its event-stream fallback kept the thread on the CPU between
+				// ticks: in LittleBigPlanet this loop was 93% of the RSX thread and 42% of the whole
+				// process, a core held at top clock to wait for the guest to finish its frame.
+				// A store is now noticed within the current sleep, at most 0.2 ms.
+				pacer.wait();
+#else
+				// With waitpkg/mwaitx this waits on the address, bounded by the timeout; without
+				// those extensions it degrades to a yield.
 				utils::spin_on_cacheline_once(atomic_sema, observed, 100);
+#endif
 			}
 
 			RSX(ctx)->fifo_wake_delay();

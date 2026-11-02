@@ -5,6 +5,7 @@
 #include "VKDataHeapManager.h"
 #include "VKResourceManager.h"
 
+#include "Emu/RSX/Common/paced_wait.h"
 #include "Emu/RSX/Common/simple_array.hpp"
 #include "Emu/RSX/rsx_profiler.h"
 #include "Emu/RSX/Utils/rsx_utils.h"
@@ -328,20 +329,42 @@ namespace vk
 			return pending_state.load();
 		}
 
+		// Both waits are for another thread to run: the RSX thread servicing the flush, or the
+		// faulting SPU/PPU threads finishing their copies. On ARM64 they sleep (see paced_wait):
+		// the WFE spin they used kept the waiting core busy, and an SPU thread that faults on a
+		// GPU-cached page measured 2.5% of the whole process in LittleBigPlanet just spinning here.
 		void consumer_wait() const
 		{
+#if defined(ARCH_ARM64)
+			rsx::paced_wait pacer;
+
+			while (num_waiters.load() != 0)
+			{
+				pacer.wait();
+			}
+#else
 			utils::spin_wait(num_waiters, [](auto v)
 			{
 				return v == 0;
 			});
+#endif
 		}
 
 		void producer_wait() const
 		{
+#if defined(ARCH_ARM64)
+			rsx::paced_wait pacer;
+
+			while (pending_state.load())
+			{
+				pacer.wait();
+			}
+#else
 			utils::spin_wait(pending_state, [](auto v)
 			{
 				return !v;
 			});
+#endif
 		}
 	};
 

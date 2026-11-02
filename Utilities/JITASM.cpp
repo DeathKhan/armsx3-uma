@@ -23,33 +23,39 @@ LOG_CHANNEL(jit_log, "JIT");
 void jit_announce(uptr func, usz size, std::string_view name)
 {
 #ifdef __linux__
-#if 0
-	static const struct tmp_perf_map
+	// Symbols for JIT code, in the perf map format profilers read: "<addr> <size> <name>" per line.
+	// Off unless a file named perf-map-enable exists in the cache directory, so it costs one
+	// check per announced function. Written to the cache directory because an Android app cannot
+	// write /tmp, and kept after exit: an app is usually stopped by being killed, and the samples
+	// are matched against the map afterwards.
+	// Decided on the first announcement after the cache directory is known: helpers compiled while
+	// the library loads are announced before Android sets it, and latching then would read the
+	// marker from the wrong place and stay off. Those early helpers are simply not in the map.
+	static atomic_t<int> s_perf_map_enabled{-1};
+
+	if (s_perf_map_enabled == -1 && !fs::get_cache_dir().empty())
 	{
-		std::string name{fmt::format("/tmp/perf-%d.map", getpid())};
-		fs::file data{name, fs::rewrite + fs::append};
+		s_perf_map_enabled = fs::is_file(fs::get_cache_dir() + "/perf-map-enable") ? 1 : 0;
+	}
 
-		tmp_perf_map() = default;
-		tmp_perf_map(const tmp_perf_map&) = delete;
-		tmp_perf_map& operator=(const tmp_perf_map&) = delete;
-
-		~tmp_perf_map()
+	if (s_perf_map_enabled == 1)
+	{
+		static const struct tmp_perf_map
 		{
-			fs::remove_file(name);
-		}
-	} s_map;
+			std::string name{fmt::format("%s/perf-%d.map", fs::get_cache_dir(), getpid())};
+			fs::file data{name, fs::rewrite + fs::append};
+		} s_map;
 
-	if (size && name.size())
-	{
-		s_map.data.write(fmt::format("%x %x %s\n", func, size, name));
+		if (size && name.size())
+		{
+			s_map.data.write(fmt::format("%x %x %s\n", func, size, name));
+		}
 	}
 
 	if (!func && !size && !name.size())
 	{
-		fs::remove_file(s_map.name);
 		return;
 	}
-#endif
 #endif
 
 	if (!size)

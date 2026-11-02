@@ -4306,6 +4306,9 @@ public:
 		{
 			const auto f = func.second.fn ? func.second.fn : func.second.chunk;
 			fpm.run(*f, fam);
+#ifdef ARCH_ARM64
+			restore_tbl_byteswap(*f);
+#endif
 		}
 
 		if (m_test_state->use_empty())
@@ -7031,6 +7034,74 @@ public:
 		return zshuffle(std::forward<TA>(a), 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
 #endif
 	}
+
+#ifdef ARCH_ARM64
+	// LLVM 22's InstCombine (simplifyNeonTbl) folds a tbl1 with a constant mask into a
+	// shufflevector, which undoes byteswap() above: the backend then lowers the byte reversal
+	// as rev64 + ext, two dependent instructions per local-store access, instead of one tbl
+	// with the mask in a register. In LittleBigPlanet's hottest SPU function those pairs were
+	// 40 of 283 instructions. Runs after the passes, so nothing folds it again; the backend
+	// has no combine in the other direction.
+	static void restore_tbl_byteswap(llvm::Function& f)
+	{
+		using namespace llvm;
+
+		auto* const vty = FixedVectorType::get(Type::getInt8Ty(f.getContext()), 16);
+		std::vector<std::pair<ShuffleVectorInst*, Value*>> found;
+
+		for (auto& bb : f)
+		{
+			for (auto& inst : bb)
+			{
+				auto* const sv = dyn_cast<ShuffleVectorInst>(&inst);
+
+				if (!sv || sv->getType() != vty || sv->getOperand(0)->getType() != vty)
+				{
+					continue;
+				}
+
+				// Lanes 0-15 index the first operand, 16-31 the second.
+				const ArrayRef<int> mask = sv->getShuffleMask();
+				bool rev0 = true, rev1 = true;
+
+				for (int k = 0; k < 16; k++)
+				{
+					rev0 &= (mask[k] == 15 - k);
+					rev1 &= (mask[k] == 31 - k);
+				}
+
+				if (rev0 || rev1)
+				{
+					found.emplace_back(sv, sv->getOperand(rev0 ? 0 : 1));
+				}
+			}
+		}
+
+		if (found.empty())
+		{
+			return;
+		}
+
+		auto* const i8 = Type::getInt8Ty(f.getContext());
+		SmallVector<Constant*, 16> idx;
+
+		for (int k = 15; k >= 0; k--)
+		{
+			idx.push_back(ConstantInt::get(i8, k));
+		}
+
+		Constant* const rev_mask = ConstantVector::get(idx);
+		FunctionCallee tbl = f.getParent()->getOrInsertFunction("llvm.aarch64.neon.tbl1.v16i8", FunctionType::get(vty, {vty, vty}, false));
+
+		for (auto& [sv, src] : found)
+		{
+			IRBuilder<> b(sv);
+			Value* const r = b.CreateCall(tbl, {src, rev_mask});
+			sv->replaceAllUsesWith(r);
+			sv->eraseFromParent();
+		}
+	}
+#endif
 
 	static auto rotqby_reverse_base()
 	{

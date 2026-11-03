@@ -1193,8 +1193,8 @@ static void jit_huge_code_start()
 		{
 			constexpr u64 c_block = 0x200000;
 			constexpr int c_madv_collapse = 25; // MADV_COLLAPSE, not in every libc header yet
-			std::set<u64> done;
-			u64 failed = 0;
+			std::set<u64> done; // collapsed or refused: not tried again
+			u64 failed = 0, total = 0;
 
 			while (true)
 			{
@@ -1215,7 +1215,8 @@ static void jit_huge_code_start()
 					unsigned long long lo = 0, hi = 0;
 					char perm[5]{};
 
-					// Executable and anonymous (no path): JIT code
+					// Executable and anonymous (no path): JIT code. (The emulator's own code is a file
+					// mapping, which this kernel cannot put on huge pages: EINVAL.)
 					if (std::sscanf(line, "%llx-%llx %4s", &lo, &hi, perm) != 3 || perm[2] != 'x' || std::strchr(line, '/'))
 					{
 						continue;
@@ -1233,9 +1234,15 @@ static void jit_huge_code_start()
 							done.insert(b);
 							collapsed++;
 						}
-						else if (failed++ < 8)
+						else
 						{
-							spu_log.notice("ARMSX3_HUGE_CODE: collapse of 0x%x failed (errno %d)", b, errno);
+							// Do not retry what the kernel refuses (mixed protections, unsupported file mappings)
+							if (failed++ < 8)
+							{
+								spu_log.notice("ARMSX3_HUGE_CODE: collapse of 0x%x failed (errno %d)", b, errno);
+							}
+
+							done.insert(b);
 						}
 					}
 				}
@@ -1244,7 +1251,8 @@ static void jit_huge_code_start()
 
 				if (collapsed)
 				{
-					spu_log.notice("ARMSX3_HUGE_CODE: %u more JIT code blocks on 2 MiB pages (%u in all)", collapsed, ::size32(done));
+					total += collapsed;
+					spu_log.notice("ARMSX3_HUGE_CODE: %u more JIT code blocks on 2 MiB pages (%u in all)", collapsed, total);
 				}
 			}
 		}).detach();

@@ -367,7 +367,15 @@ error_code sys_net_bnet_accept(ppu_thread& ppu, s32 s, vm::ptr<sys_net_sockaddr>
 
 	const auto sock = idm::check<lv2_socket>(s, [&, notify = lv2_obj::notify_all_t()](lv2_socket& sock)
 		{
-			auto [success, res, res_socket, res_addr] = sock.accept();
+			// Checked under the socket lock, as recvfrom does. Checking first and locking after left
+			// a gap: a connection queued in between signalled a poller that had not registered yet,
+			// and this thread then registered, slept, and was never woken. LittleBigPlanet connects
+			// to its own listening socket at boot and hung on "Important Information" in about one
+			// boot in fifteen. The packet thread queues connections under this same lock, so now it
+			// either lands before the check below or finds the poller registered and asleep.
+			auto lock = sock.lock();
+
+			auto [success, res, res_socket, res_addr] = sock.accept(false);
 
 			if (success)
 			{
@@ -376,8 +384,6 @@ error_code sys_net_bnet_accept(ppu_thread& ppu, s32 s, vm::ptr<sys_net_sockaddr>
 				new_socket = std::move(res_socket);
 				return true;
 			}
-
-			auto lock = sock.lock();
 
 			sock.poll_queue(idm::get_unlocked<named_thread<ppu_thread>>(ppu.id), lv2_socket::poll_t::read, [&](bs_t<lv2_socket::poll_t> events) -> bool
 				{
@@ -1605,6 +1611,7 @@ error_code sys_net_bnet_select(ppu_thread& ppu, s32 nfds, vm::ptr<sys_net_fd_set
 
 			if (auto sock = idm::check_unlocked<lv2_socket>((lv2_socket::id_base & -1024) + i))
 			{
+				{
 				auto lock = sock->lock();
 #ifdef _WIN32
 				sock->set_connecting(connecting[i]);
@@ -1629,11 +1636,46 @@ error_code sys_net_bnet_select(ppu_thread& ppu, s32 nfds, vm::ptr<sys_net_fd_set
 						sock->set_poll_event(selected);
 						return false;
 					});
+				}
+
+				// Check again now that the poller is registered. The readiness pass above and this
+				// registration take the socket lock separately, and an emulated (P2P) socket raises
+				// an event only when a packet arrives: one landing between the two found no poller
+				// to signal, and with no timeout this thread then slept forever. Registered first,
+				// checked after, the event is either seen here or delivered to the poller.
+				// LittleBigPlanet's listen thread waits this way at boot and hung on "Important
+				// Information" in about one boot in ten.
+				::pollfd recheck_fd{};
+				recheck_fd.fd = -1;
+
+				if (const auto [read_now, write_now, except_now] = sock->select(selected, recheck_fd); read_now || write_now)
+				{
+					if (read_now) rread.set(i);
+					if (write_now) rwrite.set(i);
+					signaled++;
+				}
 			}
 			else
 			{
 				return -SYS_NET_EBADF;
 			}
+		}
+
+		if (signaled)
+		{
+			// Something became ready while registering: return without sleeping, after removing the
+			// registrations (as the timeout path does) so no callback can run against this frame.
+			network_clear_queue(ppu);
+			clear_ppu_to_awake(ppu);
+			ppu.state -= cpu_flag::signal;
+
+			if (readfds)
+				*readfds = rread;
+			if (writefds)
+				*writefds = rwrite;
+			if (exceptfds)
+				*exceptfds = rexcept;
+			return not_an_error(signaled);
 		}
 
 		lv2_obj::sleep(ppu, timeout);

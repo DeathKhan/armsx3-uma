@@ -2642,7 +2642,9 @@ void VKGSRender::update_vertex_env(u32 id, const vk::vertex_upload_info& vertex_
 		vertex_info.allocated_vertex_count,
 		dst->attrib_data,
 		vertex_info.persistent_window_offset,
-		vertex_info.volatile_window_offset);
+		vertex_info.volatile_window_offset,
+		m_persistent_alias_active ? m_aliased_block_offsets.data() : nullptr,
+		m_persistent_alias_active ? m_aliased_volatile_mask : u16{0});
 
 	m_vertex_layout_ring_info.unmap();
 }

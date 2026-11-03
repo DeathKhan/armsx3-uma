@@ -326,9 +326,12 @@ namespace rsx
 		u32 vertex_count,
 		s32* buffer,
 		u32 persistent_offset_base,
-		u32 volatile_offset_base) const
+		u32 volatile_offset_base,
+		const u32* persistent_block_offsets,
+		u16 volatile_block_mask) const
 	{
 		std::array<s32, 16> offset_in_block = {};
+		std::array<bool, 16> in_volatile_buffer = {};
 		u32 volatile_offset = volatile_offset_base;
 		u32 persistent_offset = persistent_offset_base;
 
@@ -362,12 +365,26 @@ namespace rsx
 		}
 		else
 		{
-			for (const auto& block : layout.interleaved_blocks)
+			for (usz block_index = 0; block_index < layout.interleaved_blocks.size(); block_index++)
 			{
+				const auto& block = layout.interleaved_blocks[block_index];
+
+				// Blocks bound in place sit at their own offsets in guest memory, not one after
+				// another as they would in the attribute ring. A block too far from the others to
+				// share their view was copied into the volatile buffer instead; its table entry is
+				// relative to the volatile window.
+				const bool block_volatile = persistent_block_offsets && ((volatile_block_mask >> block_index) & 1);
+
+				if (persistent_block_offsets)
+				{
+					persistent_offset = block_volatile ? volatile_offset_base + persistent_block_offsets[block_index] : persistent_block_offsets[block_index];
+				}
+
 				for (const auto& attrib : block->locations)
 				{
 					const u32 local_address = (REGS(m_ctx)->vertex_arrays_info[attrib.index].offset() & 0x7fffffff);
 					offset_in_block[attrib.index] = persistent_offset + (local_address - block->base_offset);
+					in_volatile_buffer[attrib.index] = block_volatile;
 				}
 
 				const auto range = block->calculate_required_range(first_vertex, vertex_count);
@@ -526,6 +543,11 @@ namespace rsx
 			attrib0 |= (static_cast<s32>(type) << 24);
 			attrib0 |= (size << 27);
 			attrib1 |= offset_in_block[index];
+
+			if (in_volatile_buffer[index])
+			{
+				attrib1 |= volatile_storage_mask;
+			}
 
 			buffer[index * 2 + 0] = attrib0;
 			buffer[index * 2 + 1] = attrib1;

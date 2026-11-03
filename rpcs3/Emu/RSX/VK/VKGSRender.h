@@ -96,6 +96,8 @@ private:
 	bool m_persistent_alias_active = false;
 	u32 m_texel_buffer_offset_align = 256;
 	bool bind_aliased_vertex_range(u32 guest_address, u32 length, u32& persistent_range_base);
+	std::array<u32, 16> m_aliased_block_offsets{};
+	u16 m_aliased_volatile_mask = 0;
 	std::unique_ptr<vk::buffer_view> m_volatile_attribute_storage;
 
 	VkDependencyInfoKHR m_async_compute_dependency_info {};

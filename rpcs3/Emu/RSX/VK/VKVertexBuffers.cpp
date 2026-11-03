@@ -5,6 +5,7 @@
 #include "vkutils/buffer_object.h"
 #include "VKDMA.h"
 
+#include <bit>
 #include <span>
 
 #include "Emu/RSX/NV47/HW/context_accessors.define.h"
@@ -245,21 +246,106 @@ vk::vertex_upload_info VKGSRender::upload_vertex_data()
 	// covers is bound to the shader in place: the attribute fetch already reads guest layout
 	// (stride, offset, byte swap) from a byte texel buffer, so the copy into the attribute ring
 	// and the vertex-cache bookkeeping around it are the only things this skips. Draws with
-	// several blocks keep the copy; their descriptors expect the blocks concatenated.
+	// several blocks are bound as one view over the span that covers them all, each block at its
+	// own offset in it (fill_vertex_layout_state takes the per-block table). The span is capped:
+	// blocks far apart in memory would make the DMA layer import everything between them, so
+	// those draws keep the copy.
 	bool persistent_aliased = false;
 	m_persistent_alias_active = false;
+	m_aliased_volatile_mask = 0;
+
+	// Blocks too far from the bound cluster: copied after the volatile data instead.
+	struct far_block_t { u32 start, length, volatile_offset; };
+	std::array<far_block_t, 16> far_blocks{};
+	u32 far_block_count = 0;
+	const u32 volatile_data_size = required.second;
 
 	if (required.first > 0 && m_config.supports_passthrough_dma &&
-		m_vertex_layout.interleaved_blocks.size() == 1 &&
+		m_vertex_layout.interleaved_blocks.size() <= m_aliased_block_offsets.size() &&
 		REGS(m_ctx)->current_draw_clause.command != rsx::draw_command::inlined_array)
 	{
-		const auto block = m_vertex_layout.interleaved_blocks[0];
-		const auto range = block->calculate_required_range(vertex_base, vertex_count);
-		const u32 length = range.second * block->attribute_stride;
+		constexpr u32 max_span = 8 * 1024 * 1024;
+		std::array<u32, 16> block_start{};
+		std::array<u32, 16> block_length{};
+		u32 span_begin = umax, span_end = 0, total = 0;
+		bool usable = true;
 
-		if (length == required.first &&
-			bind_aliased_vertex_range(block->real_offset_address + range.first * block->attribute_stride, length, persistent_range_base))
+		for (usz i = 0; i < m_vertex_layout.interleaved_blocks.size() && usable; i++)
 		{
+			const auto block = m_vertex_layout.interleaved_blocks[i];
+			const auto range = block->calculate_required_range(vertex_base, vertex_count);
+			const u32 length = range.second * block->attribute_stride;
+			const u32 start = block->real_offset_address + range.first * block->attribute_stride;
+
+			usable = length && start + length > start;
+			block_start[i] = start;
+			block_length[i] = length;
+			total += length;
+			span_begin = std::min(span_begin, start);
+			span_end = std::max(span_end, start + length);
+		}
+
+		// Too far apart (typically some arrays in main memory and some in RSX local memory, GBs
+		// apart): bind the cluster around the largest block, and copy the others.
+		u16 far_mask = 0;
+		u32 far_bytes = 0;
+
+		if (usable && total == required.first && span_end - span_begin > max_span)
+		{
+			usz anchor = 0;
+
+			for (usz i = 1; i < m_vertex_layout.interleaved_blocks.size(); i++)
+			{
+				if (block_length[i] > block_length[anchor]) anchor = i;
+			}
+
+			span_begin = block_start[anchor];
+			span_end = block_start[anchor] + block_length[anchor];
+
+			for (usz i = 0; i < m_vertex_layout.interleaved_blocks.size(); i++)
+			{
+				if (i == anchor) continue;
+
+				const u32 begin = std::min(span_begin, block_start[i]);
+				const u32 end = std::max(span_end, block_start[i] + block_length[i]);
+
+				if (end - begin <= max_span)
+				{
+					span_begin = begin;
+					span_end = end;
+				}
+				else
+				{
+					far_mask |= static_cast<u16>(1u << i);
+					far_blocks[far_block_count++] = { block_start[i], block_length[i], utils::align(volatile_data_size, 16u) + far_bytes };
+					far_bytes += utils::align(block_length[i], 16u);
+				}
+			}
+		}
+
+		u32 span_base = 0;
+
+		if (usable && total == required.first && span_end - span_begin <= max_span &&
+			bind_aliased_vertex_range(span_begin, span_end - span_begin, span_base))
+		{
+			for (usz i = 0; i < m_vertex_layout.interleaved_blocks.size(); i++)
+			{
+				m_aliased_block_offsets[i] = (far_mask >> i) & 1
+					? far_blocks[std::popcount(static_cast<u16>(far_mask & ((1u << i) - 1)))].volatile_offset
+					: span_base + (block_start[i] - span_begin);
+			}
+
+			if (far_mask)
+			{
+				m_aliased_volatile_mask = far_mask;
+				required.second = utils::align(volatile_data_size, 16u) + far_bytes;
+			}
+			else
+			{
+				far_block_count = 0;
+			}
+
+			persistent_range_base = span_base;
 			persistent_aliased = true;
 			m_persistent_alias_active = true;
 		}
@@ -340,7 +426,17 @@ vk::vertex_upload_info VKGSRender::upload_vertex_data()
 		if (required.second > 0)
 		{
 			void *volatile_mapping = m_attrib_ring_info.map(volatile_offset, required.second);
-			RSX(m_ctx)->draw_processor()->write_vertex_data_to_memory(m_vertex_layout, vertex_base, vertex_count, nullptr, volatile_mapping);
+
+			if (volatile_data_size)
+			{
+				RSX(m_ctx)->draw_processor()->write_vertex_data_to_memory(m_vertex_layout, vertex_base, vertex_count, nullptr, volatile_mapping);
+			}
+
+			for (u32 i = 0; i < far_block_count && m_persistent_alias_active; i++)
+			{
+				std::memcpy(static_cast<char*>(volatile_mapping) + far_blocks[i].volatile_offset, vm::_ptr<char>(far_blocks[i].start), far_blocks[i].length);
+			}
+
 			m_attrib_ring_info.unmap();
 		}
 	}

@@ -7494,16 +7494,43 @@ s64 spu_thread::get_ch_value(u32 ch)
 
 					const u32 _raddr = this->raddr;
 #ifdef __linux__
+					// The 50us timeout only backs up the few writers that don't notify (most
+					// do: PUTLLC, PUT, stwcx, reservation ops, vm writer unlock). A fixed 50us made
+					// every idle SPURS kernel wake ~20,000 times a second: 41k context switches a
+					// second across the SPU threads in LittleBigPlanet on the stock driver, 71k
+					// under Turnip, where the SPUs idle longer. Back off while naps keep timing
+					// out with the line unchanged; return to 50us on any early wake or change.
+					// ARMSX3_LR_WAIT_CAP_US (driver_env.txt) sets the cap; 50 restores the old wait.
+					static const u64 s_lr_wait_cap_ns = []() -> u64
+					{
+						const char* env = std::getenv("ARMSX3_LR_WAIT_CAP_US");
+						u32 us = 0;
+
+						if (env && *env && std::from_chars(env, env + std::strlen(env), us, 10).ec == std::errc() && us >= 50 && us <= 100'000)
+						{
+							spu_log.success("ARMSX3_LR_WAIT_CAP_US: reservation wait backs off to %u us", us);
+							return u64{us} * 1000;
+						}
+
+						return 800'000;
+					}();
+
+					static thread_local u64 s_lr_wait_ns = 50'000;
+
 					if (auto [wait_var, flag_val] = vm::reservation_notifier_begin_wait(_raddr, rtime); wait_var)
 					{
 						if (!cmp_rdata(rdata, *resrv_mem) && rdata_fence())
 						{
 							raddr = 0;
 							set_events(SPU_EVENT_LR);
+							s_lr_wait_ns = 50'000;
 						}
 						else if (check_cache_line_waiter())
 						{
-							utils::bless<atomic_t<u32>>(&wait_var->raw().wait_flag)->wait(flag_val, atomic_wait_timeout{50'000});
+							const u64 wait_start = get_system_time();
+							utils::bless<atomic_t<u32>>(&wait_var->raw().wait_flag)->wait(flag_val, atomic_wait_timeout{s_lr_wait_ns});
+							const u64 waited_ns = (get_system_time() - wait_start) * 1000;
+							s_lr_wait_ns = waited_ns * 2 < s_lr_wait_ns ? 50'000 : std::min<u64>(s_lr_wait_ns * 2, s_lr_wait_cap_ns);
 						}
 
 						vm::reservation_notifier_end_wait(*wait_var);

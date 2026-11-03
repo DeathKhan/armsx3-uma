@@ -50,11 +50,16 @@ namespace vk
 		const dma_block* head() const;
 		virtual void set_parent(dma_block* parent);
 		virtual void extend(const render_device& dev, usz new_size);
+
+		// True when a passthrough block could not import its range; the caller replaces it.
+		virtual bool import_failed() const { return false; }
 	};
 
 	class dma_block_EXT: public dma_block
 	{
 	private:
+		bool m_import_failed = false;
+
 		void allocate(const render_device& dev, usz size) override;
 		void* map_range(const utils::address_range32& range) override;
 		void unmap() override;
@@ -62,5 +67,6 @@ namespace vk
 	public:
 		void flush(const utils::address_range32& range) override;
 		void load(const utils::address_range32& range) override;
+		bool import_failed() const override { return m_import_failed; }
 	};
 }

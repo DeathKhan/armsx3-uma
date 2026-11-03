@@ -67,7 +67,7 @@ namespace vk
 
 		allocated_memory = std::make_unique<vk::buffer>(dev, size,
 			dev.get_memory_mapping().host_visible_coherent, VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 0,
+			VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT, 0,
 			VMM_ALLOCATION_POOL_UNDEFINED);
 
 		// Initialize memory contents. This isn't something that happens often.
@@ -256,11 +256,19 @@ namespace vk
 		// buffer copies without causing weird issues. Overlapped incomplete data ends up overwriting host-uploaded data.
 		free();
 
-		allocated_memory = std::make_unique<vk::buffer>(dev,
-			VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		bool ok = true;
+		auto imported = std::make_unique<vk::buffer>(dev,
+			VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT,
 			vm::get_super_ptr<void>(base_address),
-			size);
+			size, &ok);
 
+		if (!ok)
+		{
+			m_import_failed = true;
+			return;
+		}
+
+		allocated_memory = std::move(imported);
 		s_allocated_dma_pool_size += allocated_memory->size();
 	}
 
@@ -322,12 +330,24 @@ namespace vk
 		if (allow_host_buffers)
 		{
 			block.reset(new dma_block_EXT());
-		}
-		else
-		{
-			block.reset(new dma_block());
+			block->init(*g_render_device, base_address, expected_length);
+
+			if (!block->import_failed())
+			{
+				return;
+			}
+
+			// Serve this range through staging instead. Reported a few times, so a driver that
+			// refuses everything is visible without flooding the log.
+			static atomic_t<u32> s_failures{0};
+
+			if (s_failures++ < 8)
+			{
+				rsx_log.warning("Passthrough DMA could not import 0x%x (+0x%x); using a staged block.", base_address, expected_length);
+			}
 		}
 
+		block.reset(new dma_block());
 		block->init(*g_render_device, base_address, expected_length);
 	}
 

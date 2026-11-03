@@ -195,7 +195,8 @@ namespace vk
 
 	struct memory_block_host : public memory_block
 	{
-		memory_block_host(VkDevice dev, void* host_pointer, u64 size, const memory_type_info& memory_type);
+		// With [ok] given, an import the kernel refuses sets *ok = false instead of dying.
+		memory_block_host(VkDevice dev, void* host_pointer, u64 size, const memory_type_info& memory_type, bool* ok = nullptr);
 		~memory_block_host();
 
 		VkDeviceMemory get_vk_device_memory() override;

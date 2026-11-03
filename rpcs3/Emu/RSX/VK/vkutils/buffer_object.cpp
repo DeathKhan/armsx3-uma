@@ -96,7 +96,7 @@ namespace vk
 		value = VK_NULL_HANDLE;
 	}
 
-	buffer::buffer(const vk::render_device& dev, VkBufferUsageFlags usage, void* host_pointer, u64 size)
+	buffer::buffer(const vk::render_device& dev, VkBufferUsageFlags usage, void* host_pointer, u64 size, bool* ok)
 		: m_device(dev)
 	{
 		info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -118,7 +118,30 @@ namespace vk
 
 		VkMemoryHostPointerPropertiesEXT memory_properties{};
 		memory_properties.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT;
-		CHECK_RESULT(_vkGetMemoryHostPointerPropertiesEXT(dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host_pointer, &memory_properties));
+
+		// With [ok], every way the import can fail reports through it rather than dying, leaving an
+		// empty buffer the caller discards. The buffer handle goes first: the destructor does run
+		// for a fully constructed object, but there is nothing to bind it to.
+		const auto fail = [&]()
+		{
+			vkDestroyBuffer(m_device, value, nullptr);
+			value = VK_NULL_HANDLE;
+			*ok = false;
+		};
+
+		if (ok)
+		{
+			if (_vkGetMemoryHostPointerPropertiesEXT(dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host_pointer, &memory_properties) != VK_SUCCESS ||
+				!memory_properties.memoryTypeBits)
+			{
+				fail();
+				return;
+			}
+		}
+		else
+		{
+			CHECK_RESULT(_vkGetMemoryHostPointerPropertiesEXT(dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host_pointer, &memory_properties));
+		}
 
 		VkMemoryRequirements memory_reqs;
 		vkGetBufferMemoryRequirements(m_device, value, &memory_reqs);
@@ -137,10 +160,24 @@ namespace vk
 
 		if (!allocation_type_info)
 		{
+			if (ok)
+			{
+				fail();
+				return;
+			}
+
 			fmt::throw_exception("No compatible memory type was found!");
 		}
 
-		memory = std::make_unique<memory_block_host>(m_device, host_pointer, size, allocation_type_info);
+		memory = std::make_unique<memory_block_host>(m_device, host_pointer, size, allocation_type_info, ok);
+
+		if (ok && !*ok)
+		{
+			memory.reset();
+			fail();
+			return;
+		}
+
 		CHECK_RESULT(vkBindBufferMemory(dev, value, memory->get_vk_device_memory(), memory->get_vk_device_memory_offset()));
 	}
 

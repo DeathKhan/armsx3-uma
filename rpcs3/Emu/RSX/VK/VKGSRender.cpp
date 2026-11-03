@@ -575,6 +575,7 @@ VKGSRender::VKGSRender(rsx::context* ctx, rsx::display_output* output) noexcept 
 
 	const auto& limits = m_device->gpu().get_limits();
 	m_texbuffer_view_size = std::min(limits.maxTexelBufferElements, VK_ATTRIB_RING_BUFFER_SIZE_M * 0x100000u);
+	m_texel_buffer_offset_align = std::max<u32>(256, static_cast<u32>(limits.minTexelBufferOffsetAlignment));
 
 	// Initialize bulk allocators
 	m_vertex_env_allocator = std::make_unique<rsx::data_heap::bulk_allocator<256, 96>>(
@@ -839,14 +840,19 @@ VKGSRender::VKGSRender(rsx::context* ctx, rsx::display_output* output) noexcept 
 		// instead of overlapping it -- and several mobile drivers fault outright
 		// when a compute queue writes an image the graphics queue is sampling.
 		//
-		// Passthrough DMA relies on importing host memory, which no mobile driver
-		// here supports.
+		// Passthrough DMA relies on importing host memory. Most mobile drivers do not offer it, and
+		// on those the extension is absent so this flag is already false. Turnip does offer it
+		// (VK_EXT_external_memory_host on KGSL, IO-coherent cached memory), and on a unified-memory
+		// SoC that is the point: the GPU reads and writes guest memory where it already is instead
+		// of through a staging copy. Ranges the kernel refuses to import fall back to a staged
+		// block (see create_dma_block). Upstream still only enables passthrough together with
+		// host GPU labels; that rule is applied after this switch.
 		if (m_config.supports_asynchronous_compute)
 		{
 			rsx_log.notice("Disabling asynchronous compute on a mobile GPU: the compute queue is not independent hardware.");
 			m_config.supports_asynchronous_compute = false;
 		}
-		if (m_config.supports_passthrough_dma)
+		if (m_config.supports_passthrough_dma && vk::get_driver_vendor() != vk::driver_vendor::TURNIP)
 		{
 			rsx_log.notice("Disabling passthrough DMA on a mobile GPU: host memory import is not supported.");
 			m_config.supports_passthrough_dma = false;
@@ -1215,6 +1221,15 @@ void VKGSRender::on_invalidate_memory_range(rsx::context* ctx, const utils::addr
 void VKGSRender::on_unmap_memory_range(const utils::address_range32& range)
 {
 	std::lock_guard lock(m_secondary_cb_guard);
+
+	// The aliased attribute view may sit on a block this unmaps. A view must be retired before
+	// its buffer; both go through the resource manager, which destroys in order of disposal.
+	if (m_aliased_attribute_storage)
+	{
+		vk::get_resource_manager()->dispose(m_aliased_attribute_storage);
+		m_persistent_alias_active = false;
+	}
+
 	vk::unmap_dma(range.start, range.length());
 }
 

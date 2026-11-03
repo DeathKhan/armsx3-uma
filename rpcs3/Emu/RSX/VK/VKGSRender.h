@@ -90,6 +90,12 @@ private:
 	std::array<vk::sampler*, rsx::limits::vertex_textures_count> vs_sampler_handles{};
 
 	std::unique_ptr<vk::buffer_view> m_persistent_attribute_storage;
+	// Vertex streams bound in place over imported guest memory (passthrough DMA); see
+	// bind_aliased_vertex_range. Active for the current draw only when the flag is set.
+	std::unique_ptr<vk::buffer_view> m_aliased_attribute_storage;
+	bool m_persistent_alias_active = false;
+	u32 m_texel_buffer_offset_align = 256;
+	bool bind_aliased_vertex_range(u32 guest_address, u32 length, u32& persistent_range_base);
 	std::unique_ptr<vk::buffer_view> m_volatile_attribute_storage;
 
 	VkDependencyInfoKHR m_async_compute_dependency_info {};

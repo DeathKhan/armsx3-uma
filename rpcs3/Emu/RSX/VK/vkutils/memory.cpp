@@ -642,7 +642,7 @@ namespace vk
 		}
 	}
 
-	memory_block_host::memory_block_host(VkDevice dev, void* host_pointer, u64 size, const memory_type_info& memory_type) :
+	memory_block_host::memory_block_host(VkDevice dev, void* host_pointer, u64 size, const memory_type_info& memory_type, bool* ok) :
 		m_device(dev), m_mem_handle(VK_NULL_HANDLE), m_host_pointer(host_pointer)
 	{
 		VkMemoryAllocateInfo alloc_info{};
@@ -656,6 +656,19 @@ namespace vk
 		import_info.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT;
 		import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
 		import_info.pHostPointer = host_pointer;
+
+		if (ok)
+		{
+			// A range the kernel will not import is an expected outcome for passthrough DMA (KGSL
+			// refuses some mappings); the caller serves it from a staged block instead.
+			if (vkAllocateMemory(m_device, &alloc_info, nullptr, &m_mem_handle) != VK_SUCCESS)
+			{
+				m_mem_handle = VK_NULL_HANDLE;
+				*ok = false;
+			}
+
+			return;
+		}
 
 		CHECK_RESULT(vkAllocateMemory(m_device, &alloc_info, nullptr, &m_mem_handle));
 	}

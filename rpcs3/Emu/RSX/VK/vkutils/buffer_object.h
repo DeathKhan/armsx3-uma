@@ -52,7 +52,8 @@ namespace vk
 			const vk::render_device& dev,
 			VkBufferUsageFlags usage,
 			void* host_pointer,
-			u64 size);
+			u64 size,
+			bool* ok = nullptr); // given: import failure sets *ok = false instead of dying
 
 		~buffer();
 

@@ -3,6 +3,7 @@
 #include "../Common/BufferUtils.h"
 #include "../rsx_methods.h"
 #include "vkutils/buffer_object.h"
+#include "VKDMA.h"
 
 #include <span>
 
@@ -240,7 +241,31 @@ vk::vertex_upload_info VKGSRender::upload_vertex_data()
 	u32 persistent_range_base = -1, volatile_range_base = -1;
 	usz persistent_offset = -1, volatile_offset = -1;
 
-	if (required.first > 0)
+	// Zero-copy vertex streams. With passthrough DMA the guest range a single interleaved block
+	// covers is bound to the shader in place: the attribute fetch already reads guest layout
+	// (stride, offset, byte swap) from a byte texel buffer, so the copy into the attribute ring
+	// and the vertex-cache bookkeeping around it are the only things this skips. Draws with
+	// several blocks keep the copy; their descriptors expect the blocks concatenated.
+	bool persistent_aliased = false;
+	m_persistent_alias_active = false;
+
+	if (required.first > 0 && m_config.supports_passthrough_dma &&
+		m_vertex_layout.interleaved_blocks.size() == 1 &&
+		REGS(m_ctx)->current_draw_clause.command != rsx::draw_command::inlined_array)
+	{
+		const auto block = m_vertex_layout.interleaved_blocks[0];
+		const auto range = block->calculate_required_range(vertex_base, vertex_count);
+		const u32 length = range.second * block->attribute_stride;
+
+		if (length == required.first &&
+			bind_aliased_vertex_range(block->real_offset_address + range.first * block->attribute_stride, length, persistent_range_base))
+		{
+			persistent_aliased = true;
+			m_persistent_alias_active = true;
+		}
+	}
+
+	if (required.first > 0 && !persistent_aliased)
 	{
 		//Check if cacheable
 		//Only data in the 'persistent' block may be cached
@@ -346,7 +371,7 @@ vk::vertex_upload_info VKGSRender::upload_vertex_data()
 		vk::clear_status_interrupt(vk::heap_changed);
 	}
 
-	if (persistent_range_base != umax)
+	if (persistent_range_base != umax && !persistent_aliased)
 	{
 		if (!m_persistent_attribute_storage || !m_persistent_attribute_storage->in_range(persistent_range_base, required.first, persistent_range_base))
 		{
@@ -381,4 +406,52 @@ vk::vertex_upload_info VKGSRender::upload_vertex_data()
 			result.vertex_index_offset,                   // Index offset
 			persistent_range_base, volatile_range_base,   // Binding range
 			result.index_info };                          // Index buffer info
+}
+
+// Binds [guest_address, +length) through the DMA block that covers it, as a byte texel buffer
+// view, and returns the offset of guest_address inside that view. The view starts at the block
+// offset rounded down to the device's texel buffer alignment; it is reused while the draw's range
+// stays inside it and the block's buffer is unchanged (map_dma can replace a block with a larger
+// one; the old buffer is then retired through the resource manager once the GPU is done).
+// load_dma is a no-op for an imported block and a copy for a staged fallback, so a range the
+// kernel would not import is still served correctly, at today's cost.
+bool VKGSRender::bind_aliased_vertex_range(u32 guest_address, u32 length, u32& persistent_range_base)
+{
+	const auto [block_offset, dma_buffer] = vk::map_dma(guest_address, length);
+
+	if (!dma_buffer)
+	{
+		return false;
+	}
+
+	vk::load_dma(guest_address, length);
+
+	u32 offset_in_view = 0;
+
+	if (!m_aliased_attribute_storage ||
+		m_aliased_attribute_storage->info.buffer != dma_buffer->value ||
+		!m_aliased_attribute_storage->in_range(block_offset, length, offset_in_view))
+	{
+		const u32 view_base = block_offset & ~(m_texel_buffer_offset_align - 1);
+		const u64 view_size = std::min<u64>(m_texbuffer_view_size, dma_buffer->size() - view_base);
+
+		if (view_size < (block_offset - view_base) + length)
+		{
+			return false;
+		}
+
+		vk::get_resource_manager()->dispose(m_aliased_attribute_storage);
+		m_aliased_attribute_storage = std::make_unique<vk::buffer_view>(*m_device, dma_buffer->value, VK_FORMAT_R8_UINT, view_base, view_size);
+		offset_in_view = block_offset - view_base;
+
+		static bool s_announced = false;
+
+		if (!std::exchange(s_announced, true))
+		{
+			rsx_log.notice("Vertex streams are bound in place over guest memory (passthrough DMA).");
+		}
+	}
+
+	persistent_range_base = offset_in_view;
+	return true;
 }

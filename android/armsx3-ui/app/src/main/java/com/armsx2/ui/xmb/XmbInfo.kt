@@ -158,7 +158,7 @@ fun xmbAboutNode(markIcon: XmbIcon): XmbNode {
                     row("page", labels[10], state.pageSize),
                 )
             },
-            XmbNode.Action("about.repo", repoTitle, info, repoDesc) { openExternalUrl(context, "https://github.com/ARMSX2/ARMSX3") },
+            XmbNode.Action("about.repo", repoTitle, info, repoDesc) { openExternalUrl(context, "https://github.com/DeathKhan/armsx3-uma") },
             XmbNode.Action("about.rpcs3", rpcs3Title, info, rpcs3Desc) { openExternalUrl(context, "https://github.com/RPCS3/rpcs3") },
             XmbNode.Folder("about.licenses", licensesTitle, info, licensesDesc) { licenses },
         )

@@ -1,6 +1,13 @@
 ARMSX3
 ======
 
+> [!NOTE]
+> **This is ARMSX3 UMA**, an unofficial performance fork of [ARMSX3](https://github.com/ARMSX2/ARMSX3)
+> for Android handhelds with Snapdragon 8 Elite / Adreno 8xx (AYN Odin 3 and similar). It installs next
+> to the official app as a separate application. See **[UMA.md](UMA.md)** for what changed, the
+> measurements, and how to install it with the bundled-driver zip. Report problems here, not to the
+> ARMSX3 team. Support the work on [Ko-fi](https://ko-fi.com/jamesfo).
+
 Uses the latest RPCS3 upstream code (the recent ARM64 improvements included). 
 
 

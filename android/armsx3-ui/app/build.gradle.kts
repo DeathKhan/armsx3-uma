@@ -35,8 +35,8 @@ android {
         // agree -- an APK that installs below its core's target is a dlopen failure at boot.
         minSdk = (project.findProperty("armsx3.minSdk") as String?)?.toInt() ?: 33
         targetSdk = 37
-        versionCode = 107
-        versionName = "1.6.1"
+        versionCode = 108
+        versionName = "1.6.1-uma.1"
 
         // ARMSX2's UI reads these. STORAGE_ALL_FILES gates the all-files storage path in
         // onboarding; IN_APP_UPDATER gates the in-app GitHub-release updater.
@@ -49,7 +49,7 @@ android {
         // declare them at all.
         buildConfigField("boolean", "STORAGE_ALL_FILES", "true")
         // Off: the updater installs official ARMSX3 releases, which are a different app.
-        buildConfigField("boolean", "IN_APP_UPDATER", "false")
+        buildConfigField("boolean", "IN_APP_UPDATER", "true")
         buildConfigField("boolean", "FRAME_GENERATION", "true")
 
         // The URI scheme Discord sign-in returns through. github keeps the SDK's default,

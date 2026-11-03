@@ -35,7 +35,7 @@ import com.armsx2.ui.common.ArmsTopBar
 import com.armsx2.ui.common.GlassPanel
 import com.armsx2.ui.common.RoundAction
 
-private const val RepositoryUrl = "https://github.com/ARMSX2/ARMSX3"
+private const val RepositoryUrl = "https://github.com/DeathKhan/armsx3-uma"
 private const val Rpcs3RepositoryUrl = "https://github.com/RPCS3/rpcs3"
 
 @Composable

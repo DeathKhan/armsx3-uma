@@ -65,7 +65,7 @@ import java.net.URL
  * shipping, and the permission is what Play rejects.
  */
 
-private const val LATEST_URL = "https://api.github.com/repos/ARMSX2/ARMSX3/releases/latest"
+private const val LATEST_URL = "https://api.github.com/repos/DeathKhan/armsx3-uma/releases/latest"
 
 private sealed interface UpdateState {
     data object Idle : UpdateState

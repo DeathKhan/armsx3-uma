@@ -1167,9 +1167,98 @@ void spu_cache::add(const spu_program& func)
 	m_file.write_gather(gather, 3);
 }
 
+#if defined(__linux__) && defined(ARCH_ARM64)
+#include <set>
+#include <sys/mman.h>
+
+// ARMSX3: JIT code on 2 MiB pages. Compiled code is committed in 2 MiB steps into anonymous memory
+// that asks for transparent huge pages, but with THP defrag off (as on Android) a fault only gets
+// one when a free 2 MiB page happens to be at hand: on the Odin 3 under LittleBigPlanet, 46% of the
+// 76 MB of resident JIT code was on huge pages and SPU threads spent 4.4% of their cycles walking
+// instruction page tables. MADV_COLLAPSE (Linux 6.1) rebuilds a range as huge pages on request.
+// Every 10 s, each executable anonymous 2 MiB block not yet collapsed is collapsed once. Layout
+// only: code and data are unchanged. ARMSX3_HUGE_CODE=0 turns it off.
+static void jit_huge_code_start()
+{
+	static std::once_flag s_once;
+
+	std::call_once(s_once, []
+	{
+		if (const char* e = std::getenv("ARMSX3_HUGE_CODE"); e && *e == '0')
+		{
+			return;
+		}
+
+		std::thread([]
+		{
+			constexpr u64 c_block = 0x200000;
+			constexpr int c_madv_collapse = 25; // MADV_COLLAPSE, not in every libc header yet
+			std::set<u64> done;
+			u64 failed = 0;
+
+			while (true)
+			{
+				std::this_thread::sleep_for(std::chrono::seconds(10));
+
+				FILE* f = std::fopen("/proc/self/maps", "r");
+
+				if (!f)
+				{
+					continue;
+				}
+
+				char line[512];
+				u32 collapsed = 0;
+
+				while (std::fgets(line, sizeof(line), f))
+				{
+					unsigned long long lo = 0, hi = 0;
+					char perm[5]{};
+
+					// Executable and anonymous (no path): JIT code
+					if (std::sscanf(line, "%llx-%llx %4s", &lo, &hi, perm) != 3 || perm[2] != 'x' || std::strchr(line, '/'))
+					{
+						continue;
+					}
+
+					for (u64 b = utils::align<u64>(lo, c_block); b + c_block <= hi; b += c_block)
+					{
+						if (done.count(b))
+						{
+							continue;
+						}
+
+						if (::madvise(reinterpret_cast<void*>(b), c_block, c_madv_collapse) == 0)
+						{
+							done.insert(b);
+							collapsed++;
+						}
+						else if (failed++ < 8)
+						{
+							spu_log.notice("ARMSX3_HUGE_CODE: collapse of 0x%x failed (errno %d)", b, errno);
+						}
+					}
+				}
+
+				std::fclose(f);
+
+				if (collapsed)
+				{
+					spu_log.notice("ARMSX3_HUGE_CODE: %u more JIT code blocks on 2 MiB pages (%u in all)", collapsed, ::size32(done));
+				}
+			}
+		}).detach();
+	});
+}
+#endif
+
 void spu_cache::initialize(bool build_existing_cache)
 {
 	jit_write_guard jit_guard;
+
+#if defined(__linux__) && defined(ARCH_ARM64)
+	jit_huge_code_start();
+#endif
 
 	spu_runtime::g_interpreter = spu_runtime::g_gateway;
 

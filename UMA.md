@@ -26,7 +26,14 @@ to 30 fps); what you get is less heat, longer battery, and more headroom for gam
 
 ## Install
 
-1. Install `armsx3-uma-1.6.1-uma.1-a15-armv8.2-sdk35.apk` from the release. Needs Android 15 or
+**Obtainium** (gets updates automatically): add this repository as an app,
+[**tap here on the device**](https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/DeathKhan/armsx3-uma)
+or paste `https://github.com/DeathKhan/armsx3-uma` into Obtainium's *Add App*. The in-app updater
+also checks this fork's releases.
+
+Manual:
+
+1. Install `armsx3-uma-<version>-a15-armv8.2-sdk35.apk` from the latest release. Needs Android 15 or
    newer on a 64-bit ARMv8.2 device (the a15 variant only; there is no Android 13 build).
 2. Install the PS3 firmware and set up games as in official ARMSX3. The official app's data is not
    shared; this is a separate app.

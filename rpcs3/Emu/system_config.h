@@ -37,6 +37,7 @@ struct cfg_root : cfg::node
 		cfg::_int<1, 6> max_spurs_threads{ this, "Max SPURS Threads", 6, true }; // HACK. If less then 6, max number of running SPURS threads in each thread group.
 		cfg::_enum<spu_block_size_type> spu_block_size{ this, "SPU Block Size", spu_block_size_type::safe };
 		cfg::_bool spu_accurate_dma{ this, "Accurate SPU DMA", false };
+		cfg::_bool disable_mlaa_patches{ this, "Disable MLAA Patches", true }; // ARMSX3 UMA: the game's MLAA-disabling patches follow this at boot
 		cfg::_bool spu_accurate_reservations{ this, "Accurate SPU Reservations", true };
 		cfg::_bool spu_mmio_delay_enabled{ this, "SPU MMIO Delay Enabled", false, true};
 		cfg::uint<3, 1000> spu_mmio_delay{ this, "SPU MMIO Delay", 100, true };

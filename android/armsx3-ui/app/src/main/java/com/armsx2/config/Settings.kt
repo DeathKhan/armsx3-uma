@@ -99,6 +99,8 @@ data class Ps3Settings(
     val spuCache: Boolean = true,
     val llvmPrecompile: Boolean = true,
     val accurateSpuDma: Boolean = false,
+    /** ARMSX3 UMA: apply every known "Disable MLAA" patch for the game at boot (SPU anti-aliasing off). */
+    val disableMlaaPatches: Boolean = true,
     /** Locks every SPU thread into a state a savestate can be serialised from.
      *
      *  Savestates cannot be taken without it: the save has to stop each SPU somewhere it can
@@ -1135,6 +1137,7 @@ data class Settings(
         put("PS3/Core", "SPU Cache", "bool", ps3.spuCache.toString())
         put("PS3/Core", "LLVM Precompilation", "bool", ps3.llvmPrecompile.toString())
         put("PS3/Core", "Accurate SPU DMA", "bool", ps3.accurateSpuDma.toString())
+        put("PS3/Core", "Disable MLAA Patches", "bool", ps3.disableMlaaPatches.toString())
         put("Savestate", "Compatible Savestate Mode", "bool", ps3.savestateCompatibleMode.toString())
         put("PS3/Core", "Clocks scale", "int", ps3.clocksScale.toString())
         // Performance > Thread Scheduler. It only ever reached Rpcs3Bridge.setAffinityMode, ARMSX2's
@@ -2190,6 +2193,7 @@ data class Settings(
         put("ps3SpuCache", ps3.spuCache)
         put("ps3LlvmPrecompile", ps3.llvmPrecompile)
         put("ps3AccurateSpuDma", ps3.accurateSpuDma)
+        put("ps3DisableMlaaPatches", ps3.disableMlaaPatches)
         put("ps3SavestateCompatibleMode", ps3.savestateCompatibleMode)
         put("ps3ClocksScale", ps3.clocksScale)
         put("ps3ResolutionScale", ps3.resolutionScale)
@@ -2563,6 +2567,7 @@ data class Settings(
                     spuCache = json.optBoolean("ps3SpuCache", def.ps3.spuCache),
                     llvmPrecompile = json.optBoolean("ps3LlvmPrecompile", def.ps3.llvmPrecompile),
                     accurateSpuDma = json.optBoolean("ps3AccurateSpuDma", def.ps3.accurateSpuDma),
+                    disableMlaaPatches = json.optBoolean("ps3DisableMlaaPatches", def.ps3.disableMlaaPatches),
                     savestateCompatibleMode = json.optBoolean("ps3SavestateCompatibleMode", def.ps3.savestateCompatibleMode),
                     clocksScale = json.optInt("ps3ClocksScale", def.ps3.clocksScale),
                     resolutionScale = json.optInt("ps3ResolutionScale", def.ps3.resolutionScale),
@@ -2910,6 +2915,7 @@ data class Settings(
             if (current.ps3.spuCache != base.ps3.spuCache) j.put("ps3SpuCache", current.ps3.spuCache)
             if (current.ps3.llvmPrecompile != base.ps3.llvmPrecompile) j.put("ps3LlvmPrecompile", current.ps3.llvmPrecompile)
             if (current.ps3.accurateSpuDma != base.ps3.accurateSpuDma) j.put("ps3AccurateSpuDma", current.ps3.accurateSpuDma)
+            if (current.ps3.disableMlaaPatches != base.ps3.disableMlaaPatches) j.put("ps3DisableMlaaPatches", current.ps3.disableMlaaPatches)
             if (current.ps3.savestateCompatibleMode != base.ps3.savestateCompatibleMode) j.put("ps3SavestateCompatibleMode", current.ps3.savestateCompatibleMode)
             if (current.ps3.clocksScale != base.ps3.clocksScale) j.put("ps3ClocksScale", current.ps3.clocksScale)
             if (current.ps3.resolutionScale != base.ps3.resolutionScale) j.put("ps3ResolutionScale", current.ps3.resolutionScale)
@@ -3233,6 +3239,7 @@ data class Settings(
                     spuCache = if (overrides.has("ps3SpuCache")) overrides.getBoolean("ps3SpuCache") else base.ps3.spuCache,
                     llvmPrecompile = if (overrides.has("ps3LlvmPrecompile")) overrides.getBoolean("ps3LlvmPrecompile") else base.ps3.llvmPrecompile,
                     accurateSpuDma = if (overrides.has("ps3AccurateSpuDma")) overrides.getBoolean("ps3AccurateSpuDma") else base.ps3.accurateSpuDma,
+                    disableMlaaPatches = if (overrides.has("ps3DisableMlaaPatches")) overrides.getBoolean("ps3DisableMlaaPatches") else base.ps3.disableMlaaPatches,
                     savestateCompatibleMode = if (overrides.has("ps3SavestateCompatibleMode")) overrides.getBoolean("ps3SavestateCompatibleMode") else base.ps3.savestateCompatibleMode,
                     clocksScale = if (overrides.has("ps3ClocksScale")) overrides.getInt("ps3ClocksScale") else base.ps3.clocksScale,
                     resolutionScale = if (overrides.has("ps3ResolutionScale")) overrides.getInt("ps3ResolutionScale") else base.ps3.resolutionScale,

@@ -382,6 +382,14 @@ fun PerformanceTab(state: MutableState<Settings>) {
                 notDefault = s.notDefault { it.ps3.accurateSpuDma },
             )
             SettingsDivider()
+            ToggleRow(
+                label = str("perf.disableMlaa.label"),
+                value = s.ps3.disableMlaaPatches,
+                description = str("perf.disableMlaa.description"),
+                onChange = { apply(s.copy(ps3 = s.ps3.copy(disableMlaaPatches = it))) },
+                notDefault = s.notDefault { it.ps3.disableMlaaPatches },
+            )
+            SettingsDivider()
             // Sits with the SPU rows because that is what it costs, not under a savestate
             // heading where it would read as free.
             ToggleRow(

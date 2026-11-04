@@ -100,6 +100,7 @@ extern bool ppu_load_rel_exec(const ppu_rel_object&);
 
 extern void send_close_home_menu_cmds();
 extern bool savedata_commit_by_copy(const std::string& from, const std::string& to); // ARMSX3, cellSaveData.cpp
+extern "C" unsigned _armsx3_setMlaaPatches(std::string_view serial, bool enable); // ARMSX3 UMA, android/src/armsx3-core.cpp
 
 extern void signal_system_cache_can_stay();
 
@@ -2368,6 +2369,13 @@ game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch,
 
 			// Initialize patch engine
 			g_fxo->need<patch_engine>();
+
+			// ARMSX3 UMA: the game's MLAA-disabling patches follow "Disable MLAA Patches" (on by
+			// default; per-game override to keep a game's MLAA). Written before the patches load.
+			if (const unsigned n = _armsx3_setMlaaPatches(m_title_id, g_cfg.core.disable_mlaa_patches.get()))
+			{
+				sys_log.notice("Disable MLAA Patches: %s %u patch(es) for %s", g_cfg.core.disable_mlaa_patches ? "applied" : "released", n, m_title_id);
+			}
 
 			// Load patches from different locations
 			g_fxo->get<patch_engine>().append_global_patches();

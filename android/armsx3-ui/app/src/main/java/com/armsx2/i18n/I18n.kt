@@ -1771,6 +1771,8 @@ val EN: Map<String, String> = mapOf(
     "perf.savestateCompatible.description" to "Required for save states to work at all: saving has to stop every SPU somewhere it can be written out, and without this that fails on any game with SPU work running. Costs SPU performance while it is on, and each save state is roughly 500 MB to 3 GB, so a few of them will fill your storage.",
     "perf.accurateSpuDma.label" to "Accurate SPU DMA",
     "perf.accurateSpuDma.description" to "Emulates SPU DMA transfers precisely. Slower, and only needed by a handful of games that corrupt without it.",
+    "perf.disableMlaa.label" to "Disable MLAA (SPU anti-aliasing)",
+    "perf.disableMlaa.description" to "Applies every known \"Disable MLAA\" patch for the game at boot. MLAA is the post-process anti-aliasing some games run on the SPUs; it costs a lot of CPU here for a small image gain. Turn off (globally, or per game) to keep a game's MLAA. Only games with such a patch in the RPCS3, Artemis or bundled lists are affected.",
     "common.auto" to "Auto",
     "perf.scheduler.label" to "Thread Scheduler",
     "perf.scheduler.os" to "Operating System",

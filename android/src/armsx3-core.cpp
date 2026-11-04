@@ -6492,6 +6492,46 @@ extern "C" bool _armsx3_patchSetEnabled(std::string_view hash,
   return true;
 }
 
+/** ARMSX3 UMA: whether a patch disables the game's MLAA (the SPU post-process anti-aliasing).
+ *  The databases name them "Disable MLAA", "Disable in-built MLAA", "Disable Blur/MLAA" and
+ *  "Disable MLAA (Post-processing on SPU)". */
+static bool is_mlaa_patch(std::string_view description) {
+  std::string lower(description);
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return lower.find("mlaa") != std::string::npos && lower.find("disable") != std::string::npos;
+}
+
+/**
+ * ARMSX3 UMA: every patch that disables the MLAA of `serial` is switched on (`enable`) or off,
+ * through the same per-serial write the Patches tab uses, so patch_config.yml ends up as if the
+ * user had toggled each one. Called at boot with the "Disable MLAA Patches" setting, global or
+ * per game: on by default, because MLAA runs on the SPUs and costs this hardware more than the
+ * anti-aliasing is worth. Only games the databases have such a patch for are affected. Returns
+ * the number of patches written.
+ */
+extern "C" unsigned _armsx3_setMlaaPatches(std::string_view serial, bool enable) {
+  if (serial.empty()) return 0;
+
+  const patch_engine::patch_map &db = cached_patch_db();
+  const std::string ser(serial);
+  unsigned written = 0;
+
+  for (const auto &[hash, container] : db)
+    for (const auto &[description, info] : container.patch_info_map) {
+      if (!is_mlaa_patch(description)) continue;
+
+      bool applies = false;
+      for (const auto &[title, serials] : info.titles)
+        if (serials.find(ser) != serials.end()) applies = true;
+      if (!applies) continue;
+
+      if (_armsx3_patchSetEnabled(hash, description, serial, "", enable)) written++;
+    }
+
+  return written;
+}
+
 extern "C" bool _armsx3_hasState(unsigned int index) {
   if (index == 0) {
     index = 1;

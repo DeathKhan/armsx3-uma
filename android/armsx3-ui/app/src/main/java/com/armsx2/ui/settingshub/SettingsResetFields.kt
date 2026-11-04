@@ -28,7 +28,7 @@ internal val SETTINGS_CATEGORY_FIELDS: Map<SettingsCategory, List<String>> = map
         "accurateBlendingUnit", "affinityMode", "eeClampMode", "eeCycleRate", "eeCycleSkip",
         "eeFpuRoundMode", "fastCDVD", "fpsLimit", "frameSkip", "framerateNtsc", "frameratePal",
         "hwMipmap", "hwRov", "hwScaler", "intcStat", "mtvu", "nominalSpeedPercent",
-        "ps3AccurateCacheLine", "ps3AccurateSpuDma", "ps3AccurateSpuRsv", "ps3ClocksScale",
+        "ps3AccurateCacheLine", "ps3AccurateSpuDma", "ps3DisableMlaaPatches", "ps3AccurateSpuRsv", "ps3ClocksScale",
         "ps3GpuTurbo", "ps3LlvmPrecompile", "ps3LlvmThreads", "ps3MaxSpursThreads",
         "ps3PpuDecoder", "ps3PreferredSpuThreads", "ps3SavestateCompatibleMode",
         "ps3SilenceAllLogs", "ps3SpuBlockSize", "ps3SpuCache", "ps3SpuDecoder",

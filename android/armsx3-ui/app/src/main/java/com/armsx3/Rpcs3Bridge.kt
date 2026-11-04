@@ -316,6 +316,10 @@ object Rpcs3Bridge {
         // Cheap after the first success -- it is a single preference read once the
         // bundled revision matches.
         appContext?.let { com.armsx2.Ps3PatchRepo.ensureBundledPatches(it) }
+        // ARMSX3 UMA: the RPCS3 patch database, which "Disable MLAA Patches" draws on, is fetched
+        // in the background when it is missing or a week old, so it does not depend on a visit to
+        // the Patches tab. The boot that triggers the first fetch runs without it.
+        appContext?.let { com.armsx2.Ps3PatchRepo.ensureDatabase(it) }
 
         // Before the core can draw a native overlay. cellSaveData's list is one, and it draws
         // its rows with save.png/new.png -- absent, the load menu a game opens never appeared.
@@ -760,6 +764,7 @@ object Rpcs3Bridge {
                 "SPU Cache" -> Rpcs3Settings.setSpuCache(asBool(value))
                 "LLVM Precompilation" -> Rpcs3Settings.setLlvmPrecompilation(asBool(value))
                 "Accurate SPU DMA" -> Rpcs3Settings.setAccurateSpuDma(asBool(value))
+                "Disable MLAA Patches" -> Rpcs3Settings.setDisableMlaaPatches(asBool(value))
                 "Clocks scale" -> Rpcs3Settings.setClocksScale(asInt(value))
                 "Thread Scheduler Mode" -> Rpcs3Settings.setThreadScheduler(
                     when (asInt(value)) {

@@ -279,6 +279,29 @@ object Ps3PatchRepo {
      * Patches applicable to a serial. An empty serial lists everything, which is
      * what the standalone tab shows when no game is selected.
      */
+    private const val KEY_DB_REFRESH_ATTEMPT = "ps3_patch_db_refresh_attempt"
+
+    /**
+     * ARMSX3 UMA: keep the RPCS3 database present and fresh without a visit to the Patches tab,
+     * because "Disable MLAA Patches" needs its universal "Disable SPU MLAA" entries. Missing or
+     * older than a week, it is downloaded on a background thread (the core must be loaded, for
+     * the engine version); at most one attempt every six hours, so an offline device is not
+     * asked at every boot.
+     */
+    fun ensureDatabase(context: Context) {
+        val db = java.io.File(patchesDir(), DB_FILE)
+        val weekMs = 7L * 24 * 3600 * 1000
+        val now = System.currentTimeMillis()
+        if (db.isFile && now - db.lastModified() < weekMs) return
+        val p = prefs(context)
+        if (now - p.getLong(KEY_DB_REFRESH_ATTEMPT, 0L) < 6L * 3600 * 1000) return
+        p.edit().putLong(KEY_DB_REFRESH_ATTEMPT, now).apply()
+        Thread({
+            val result = runCatching { download(context) }.getOrNull()
+            android.util.Log.i("ARMSX3", "patches: automatic database refresh: $result")
+        }, "patch-db-refresh").start()
+    }
+
     fun list(serial: String): List<Patch> = runCatching {
         val arr = JSONArray(ARMSX3.instance.patchesList(serial))
         (0 until arr.length()).map { i ->

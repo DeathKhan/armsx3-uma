@@ -553,6 +553,10 @@ object Rpcs3Settings {
     fun setAccurateSpuDma(enabled: Boolean) =
         setBool("$CORE@@Accurate SPU DMA", enabled)
 
+    /** ARMSX3 UMA: every MLAA-disabling patch is switched on at boot (Emu/System.cpp). */
+    fun setDisableMlaaPatches(enabled: Boolean) =
+        setBool("$CORE@@Disable MLAA Patches", enabled)
+
     // ---- PS3 video / audio / net ---------------------------------------
 
     private val MSAA_LEVELS = arrayOf("Disabled", "Auto")

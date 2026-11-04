@@ -2374,7 +2374,7 @@ game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch,
 			// default; per-game override to keep a game's MLAA). Written before the patches load.
 			if (const unsigned n = _armsx3_setMlaaPatches(m_title_id, g_cfg.core.disable_mlaa_patches.get()))
 			{
-				sys_log.notice("Disable MLAA Patches: %s %u patch(es) for %s", g_cfg.core.disable_mlaa_patches ? "applied" : "released", n, m_title_id);
+				sys_log.notice("Disable MLAA Patches: %u MLAA patch(es) switched %s (universal ones and %s's own)", n, g_cfg.core.disable_mlaa_patches ? "on" : "off", m_title_id);
 			}
 
 			// Load patches from different locations

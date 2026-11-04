@@ -1772,7 +1772,7 @@ val EN: Map<String, String> = mapOf(
     "perf.accurateSpuDma.label" to "Accurate SPU DMA",
     "perf.accurateSpuDma.description" to "Emulates SPU DMA transfers precisely. Slower, and only needed by a handful of games that corrupt without it.",
     "perf.disableMlaa.label" to "Disable MLAA (SPU anti-aliasing)",
-    "perf.disableMlaa.description" to "Applies every known \"Disable MLAA\" patch for the game at boot. MLAA is the post-process anti-aliasing some games run on the SPUs; it costs a lot of CPU here for a small image gain. Turn off (globally, or per game) to keep a game's MLAA. Only games with such a patch in the RPCS3, Artemis or bundled lists are affected.",
+    "perf.disableMlaa.description" to "Switches on every \"Disable MLAA\" patch at boot: RPCS3's universal ones, which catch any game using Sony's Edge MLAA SPU module (dozens of titles), and the game's own. MLAA is post-process anti-aliasing run on the SPUs; it costs a lot of CPU here for a small image gain. Turn off (globally, or per game) to keep a game's MLAA. Games with no such patch are unaffected.",
     "common.auto" to "Auto",
     "perf.scheduler.label" to "Thread Scheduler",
     "perf.scheduler.os" to "Operating System",

@@ -69,6 +69,17 @@ The in-app updater checks this fork's releases, not the official ones.
   hung on its first notice about one boot in ten.
 - Builds on Linux and case-sensitive file systems.
 
+**Disable MLAA (Settings → Performance, on by default).** MLAA is the post-process anti-aliasing
+many PS3 games run on the SPUs; on this hardware it costs far more CPU than the smoothing is worth.
+RPCS3 has no switch for it, only patches, so at every boot the setting switches on every
+MLAA-disabling patch: RPCS3's universal "Disable SPU MLAA" patches (keyed by the hash of Sony's Edge
+MLAA SPU module, so they catch any game that loads it: Journey, Tokyo Jungle, Portal 2, the Yakuza
+games, SoulCalibur V, Shadow of the Colossus, ICO, MotorStorm Apocalypse, Sly Cooper: Thieves in
+Time, LittleBigPlanet 2 and 3, Metro Last Light, God of War: Ascension, Twisted Metal, DmC and
+dozens more) plus the game's own entries (God of War III, Killzone 3, Puppeteer, Dragon Age II,
+GT6…). Turn it off, globally or per game, to keep a game's MLAA. Games with no such patch are
+unaffected.
+
 Tuning knobs, for experiments only, go in `Android/data/com.armsx3.uma/files/driver_env.txt` (one
 `NAME=value` per line): `ARMSX3_LR_WAIT_CAP_US` (reservation-wait cap, default 800) and
 `ARMSX3_HUGE_CODE=0` (turn the huge-page collapse off).

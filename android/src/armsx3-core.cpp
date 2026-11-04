@@ -6503,12 +6503,17 @@ static bool is_mlaa_patch(std::string_view description) {
 }
 
 /**
- * ARMSX3 UMA: every patch that disables the MLAA of `serial` is switched on (`enable`) or off,
- * through the same per-serial write the Patches tab uses, so patch_config.yml ends up as if the
- * user had toggled each one. Called at boot with the "Disable MLAA Patches" setting, global or
- * per game: on by default, because MLAA runs on the SPUs and costs this hardware more than the
- * anti-aliasing is worth. Only games the databases have such a patch for are affected. Returns
- * the number of patches written.
+ * ARMSX3 UMA: every patch that disables MLAA is switched on (`enable`) or off, through the same
+ * write the Patches tab uses, so patch_config.yml ends up as if the user had toggled each one.
+ * Called at boot with the "Disable MLAA Patches" setting (global or per game): on by default,
+ * because MLAA runs on the SPUs and costs this hardware more than the anti-aliasing is worth.
+ *
+ * Two kinds of patch count. The per-game ones (PPU or SPU hash, the game's serial listed) are
+ * written for `serial` alone. The universal ones ("Disable SPU MLAA - Multiple titles", keyed by
+ * the hash of Sony's Edge MLAA SPU module and listed under "All") apply to whichever game loads
+ * that module, so they are written for "All": they follow the setting of the game being booted,
+ * and the next boot with the setting the other way flips them back. Returns the number of
+ * patches written.
  */
 extern "C" unsigned _armsx3_setMlaaPatches(std::string_view serial, bool enable) {
   if (serial.empty()) return 0;
@@ -6521,12 +6526,15 @@ extern "C" unsigned _armsx3_setMlaaPatches(std::string_view serial, bool enable)
     for (const auto &[description, info] : container.patch_info_map) {
       if (!is_mlaa_patch(description)) continue;
 
-      bool applies = false;
-      for (const auto &[title, serials] : info.titles)
+      bool applies = false, universal = false;
+      for (const auto &[title, serials] : info.titles) {
         if (serials.find(ser) != serials.end()) applies = true;
-      if (!applies) continue;
+        if (serials.find(std::string(patch_key::all)) != serials.end()) universal = true;
+      }
+      if (!applies && !universal) continue;
 
-      if (_armsx3_patchSetEnabled(hash, description, serial, "", enable)) written++;
+      // An empty serial writes every serial the patch lists, which for a universal one is "All".
+      if (_armsx3_patchSetEnabled(hash, description, universal ? std::string_view{} : serial, "", enable)) written++;
     }
 
   return written;

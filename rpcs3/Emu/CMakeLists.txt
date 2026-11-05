@@ -91,6 +91,9 @@ target_sources(rpcs3_emu PRIVATE
     ../../Utilities/stereo_config.cpp
     ../../Utilities/StrFmt.cpp
     ../../Utilities/Thread.cpp
+    ../../Utilities/CellFiber.cpp
+    ../../Utilities/CellScheduler.cpp
+    ../../Utilities/CellPpuRuntime.cpp
     ../../Utilities/version.cpp
 )
 if(APPLE)

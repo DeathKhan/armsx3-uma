@@ -4981,6 +4981,10 @@ void thread_ctrl::apply_cell_policy(thread_class group)
 	if (!cell::enabled()) return;
 	cell::waiter_enabled() = group == thread_class::ppu || group == thread_class::spu;
 	const auto& layout = get_cell_topology(process_affinity_mask);
+	if (layout)
+		cell::ppu_runtime_on_cell_policy(layout.upper);
+	else
+		cell::ppu_runtime_on_cell_policy(0);
 	if (!layout) return;
 	set_thread_affinity_mask(get_affinity_mask(group));
 #if defined(ARCH_ARM64) && defined(__linux__) && defined(SYS_sched_getattr) && defined(SYS_sched_setattr)

@@ -64,8 +64,65 @@ void timed_work(cell::fiber_task& task, void*)
 }
 }
 
+// Preemption: a CPU-bound guest and a 1 ms periodic guest on the same host.
+// The tick pokes the spinner after its slice; the spinner's safe point yields.
+std::atomic<bool> g_spin_poked{false};
+std::atomic<bool> g_spin_stop{false};
+std::atomic<std::uint64_t> g_max_late_ns{0};
+std::atomic<unsigned> g_periodic_done{0};
+
+void spin_poke(void*) { g_spin_poked = true; }
+
+void spinner_work(cell::fiber_task& task, void*)
+{
+	while (!g_spin_stop.load())
+	{
+		if (g_spin_poked.exchange(false) && task.take_preempt())
+			task.yield();
+	}
+}
+
+void periodic_work(cell::fiber_task& task, void*)
+{
+	for (unsigned i = 0; i < 100; ++i)
+	{
+		const auto due = cell::scheduler::now_ns() + 1'000'000;
+		task.park(due);
+		const auto now = cell::scheduler::now_ns();
+		const std::uint64_t late = now > due ? now - due : 0;
+		std::uint64_t prev = g_max_late_ns.load();
+		while (late > prev && !g_max_late_ns.compare_exchange_weak(prev, late)) {}
+	}
+	g_periodic_done = 1;
+	g_spin_stop = true;
+}
+
+static void preemption()
+{
+	cell::scheduler sched(1);
+	auto& spin = sched.spawn(0, &spinner_work, nullptr);
+	spin.set_poke(&spin_poke, nullptr);
+	sched.admit(sched.spawn(0, &periodic_work, nullptr));
+	sched.admit(spin);
+	std::atomic<bool> tick_stop{false};
+	std::thread ticker([&] { while (!tick_stop) { sched.preempt_scan(2'000'000); std::this_thread::sleep_for(std::chrono::microseconds(500)); } });
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+	while (!g_periodic_done.load() && std::chrono::steady_clock::now() < deadline)
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	tick_stop = true;
+	ticker.join();
+	g_spin_stop = true;
+	sched.stop();
+	sched.join();
+	CHECK(g_periodic_done.load());
+	CHECK(g_max_late_ns.load() < 20'000'000);
+	std::printf("Cell preemption fixture: 100 x 1 ms periodic parks beside a spinning guest, max lateness %.2f ms, preempts=%llu\n",
+		g_max_late_ns.load() / 1e6, static_cast<unsigned long long>(sched.preempt_count()));
+}
+
 int main()
 {
+	preemption();
 	cell::scheduler sched(2);
 	std::vector<pingpong> pps(n_fibers);
 	for (unsigned i = 0; i < n_fibers; ++i)

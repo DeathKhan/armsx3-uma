@@ -34,6 +34,8 @@ enum class cpu_flag : u32
 	dbg_pause, // Thread paused
 	dbg_step, // Thread forced to pause after one step (one instruction, etc)
 
+	fiber_yield, // ARMSX3_CELL_FIBER: time slice expired; consumed by check_state (appended: keeps other bits stable)
+
 	__bitset_enum_max
 };
 

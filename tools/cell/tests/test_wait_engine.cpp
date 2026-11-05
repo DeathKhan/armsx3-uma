@@ -247,7 +247,7 @@ static cell::scheduler* g_fiber_sched = nullptr;
 namespace cell
 {
 void* current_fiber() noexcept { return scheduler::current_task(); }
-void park_fiber(std::uint64_t deadline_ns)
+void park_fiber(std::uint64_t deadline_ns, const void*, std::uint32_t, const void*)
 {
     if (auto* task = scheduler::current_task()) task->park(deadline_ns);
 }
@@ -427,6 +427,89 @@ static void fiber_semaphores()
     g_fiber_sched = nullptr;
 }
 
+// shared_mutex (idm/lv2 object locks) contended by guest fibers on both hosts
+// and native threads: readers and writers, with fibers taking timed parks while
+// holding the lock (an lv2 sleep/suspend inside an idm::get lambda).
+namespace
+{
+constexpr unsigned shm_rounds = 3000;
+shared_mutex g_shm;
+u64 g_shm_counter = 0;
+std::atomic<unsigned> g_shm_readers{0};
+std::atomic<unsigned> g_shm_bad{0};
+std::atomic<unsigned> g_shm_done{0};
+
+void shm_round(unsigned r, unsigned id)
+{
+    if ((r + id) % 3 == 0)
+    {
+        std::lock_guard lock(g_shm);
+        if (g_shm_readers.load()) g_shm_bad++;
+        const u64 v = g_shm_counter;
+        if (r % 97 == 0)
+        {
+            atomic_t<u32> never{0};
+            never.wait(0, atomic_wait_timeout{200'000});
+        }
+        g_shm_counter = v + 1;
+    }
+    else
+    {
+        g_shm.lock_shared();
+        g_shm_readers++;
+        if (r % 89 == 0)
+        {
+            atomic_t<u32> never{0};
+            never.wait(0, atomic_wait_timeout{100'000});
+        }
+        g_shm_readers--;
+        g_shm.unlock_shared();
+    }
+}
+
+void shm_fiber(cell::fiber_task& task, void* p)
+{
+    const unsigned id = static_cast<unsigned>(reinterpret_cast<uptr>(p));
+    for (unsigned r = 0; r < shm_rounds; ++r)
+    {
+        shm_round(r, id);
+        if (r % 16 == 0) task.yield();
+    }
+    g_shm_done++;
+}
+}
+
+static void fiber_shared_mutex()
+{
+    cell::scheduler sched(2);
+    g_fiber_sched = &sched;
+    constexpr unsigned fibers = 8, natives = 3;
+    for (unsigned i = 0; i < fibers; ++i)
+        sched.admit(sched.spawn(i % 2, &shm_fiber, reinterpret_cast<void*>(uptr{i})));
+    std::vector<std::thread> threads;
+    for (unsigned i = 0; i < natives; ++i)
+        threads.emplace_back([i] { for (unsigned r = 0; r < shm_rounds; ++r) shm_round(r, 100 + i); g_shm_done++; });
+    const auto deadline = clock_type::now() + std::chrono::seconds(30);
+    while (g_shm_done.load() < fibers + natives)
+    {
+        if (clock_type::now() > deadline)
+        {
+            std::fprintf(stderr, "fiber shared_mutex: STALL done=%u/%u value=0x%x parks=%llu wakes=%llu\n", g_shm_done.load(), fibers + natives,
+                0u, static_cast<unsigned long long>(sched.park_count()), static_cast<unsigned long long>(sched.wake_count()));
+            std::abort();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    for (auto& t : threads) t.join();
+    assert(g_shm_bad.load() == 0);
+    std::printf("fiber shared_mutex: %u fibers + %u native threads x %u rounds, parks inside locks; writes=%llu parks=%llu wakes=%llu\n",
+        fibers, natives, shm_rounds, static_cast<unsigned long long>(g_shm_counter),
+        static_cast<unsigned long long>(sched.park_count()), static_cast<unsigned long long>(sched.wake_count()));
+    sched.stop();
+    sched.join();
+    g_fiber_sched = nullptr;
+}
+
 static void fiber_waits()
 {
     cell::scheduler sched(2);
@@ -474,6 +557,7 @@ int main()
     timeouts_callbacks();
     fiber_waits();
     fiber_semaphores();
+    fiber_shared_mutex();
     for (const auto& root : s_hashtable) assert(root.bits.load().ref == 0);
     ::alarm(0);
 #if defined(ARCH_ARM64)

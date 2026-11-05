@@ -51,6 +51,24 @@ public:
 	const std::uintptr_t* park_frames() const noexcept { return m_park_frames; }
 	std::uint64_t park_ns() const noexcept { return m_park_ns.load(std::memory_order_relaxed); }
 	unsigned state() const noexcept { return m_state.load(std::memory_order_relaxed); }
+	bool wake_pending() const noexcept { return m_wake.load(std::memory_order_relaxed); }
+
+	// Preemption: poke(arg) makes the running guest reach a safe point soon
+	// (PPU: a harmless state flag that forces check_state); the safe point then
+	// calls take_preempt() and yields when it returns true.
+	void set_poke(void (*poke)(void*), void* arg) noexcept { m_poke = poke; m_poke_arg = arg; }
+	bool take_preempt() noexcept { return m_preempt.load(std::memory_order_relaxed) && m_preempt.exchange(false); }
+
+	// Diagnostics: what the latest atomic-wait park was waiting on.
+	void note_wait(const void* data, std::uint32_t old_value, const std::atomic<std::uint32_t>* sync) noexcept
+	{
+		m_wait_data = data;
+		m_wait_old = old_value;
+		m_wait_sync = sync;
+	}
+	const void* wait_data() const noexcept { return m_wait_data; }
+	std::uint32_t wait_old() const noexcept { return m_wait_old; }
+	const std::atomic<std::uint32_t>* wait_sync() const noexcept { return m_wait_sync; }
 
 private:
 	friend class scheduler;
@@ -73,6 +91,12 @@ private:
 	std::vector<std::byte> m_tls; // fiber_tls block, filled on first run
 	std::uintptr_t m_park_frames[park_frame_count]{};
 	std::atomic<std::uint64_t> m_park_ns{0};
+	void (*m_poke)(void*) = nullptr;
+	void* m_poke_arg = nullptr;
+	std::atomic<bool> m_preempt{false};
+	const void* m_wait_data = nullptr;
+	std::uint32_t m_wait_old = 0;
+	const std::atomic<std::uint32_t>* m_wait_sync = nullptr;
 };
 
 class scheduler final
@@ -100,6 +124,13 @@ public:
 	std::uint64_t timeout_count() const noexcept { return m_timeouts.load(std::memory_order_relaxed); }
 	static fiber_task* current_task() noexcept { return t_current; }
 	static std::uint64_t now_ns() noexcept;
+	// Ask every guest that has run longer than slice_ns while others are ready
+	// on its host to yield at its next safe point. Any thread; returns pokes sent.
+	unsigned preempt_scan(std::uint64_t slice_ns);
+	std::uint64_t preempt_count() const noexcept { return m_preempts.load(std::memory_order_relaxed); }
+
+	// Diagnostics snapshot of a host's queues.
+	void host_depth(unsigned host_index, std::size_t& ready, std::size_t& timers);
 
 private:
 	friend class fiber_task;
@@ -112,6 +143,8 @@ private:
 		std::vector<fiber_task*> ready;
 		std::vector<std::pair<std::uint64_t, fiber_task*>> timers; // min-heap on deadline
 		std::vector<std::byte> pristine_tls;
+		std::atomic<fiber_task*> running{nullptr};
+		std::atomic<std::uint64_t> run_start_ns{0};
 		bool stop = false;
 	};
 
@@ -131,6 +164,7 @@ private:
 	std::atomic<std::uint64_t> m_parks{0};
 	std::atomic<std::uint64_t> m_wakes{0};
 	std::atomic<std::uint64_t> m_timeouts{0};
+	std::atomic<std::uint64_t> m_preempts{0};
 	std::atomic<bool> m_stopping{false};
 	static thread_local fiber_task* t_current;
 };

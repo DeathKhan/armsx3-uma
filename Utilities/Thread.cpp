@@ -3999,7 +3999,7 @@ bool thread_base::register_cell_fiber_tls()
 
 [[maybe_unused]] static const bool s_cell_fiber_tls_thread = thread_base::register_cell_fiber_tls();
 
-void thread_base::start_fiber(u64 (*entry)(thread_base*), std::string (*describe)(thread_base*))
+void thread_base::start_fiber(u64 (*entry)(thread_base*), std::string (*describe)(thread_base*), void (*poke)(thread_base*))
 {
 	m_sync.atomic_op([&](u32& v)
 	{
@@ -4011,7 +4011,7 @@ void thread_base::start_fiber(u64 (*entry)(thread_base*), std::string (*describe
 	m_thread.release(1);
 	m_cell_fiber_backend = true;
 
-	cell::ppu_runtime::get().spawn_guest(*this, entry, describe);
+	cell::ppu_runtime::get().spawn_guest(*this, entry, describe, poke);
 }
 
 void thread_base::initialize(void (*error_cb)())

@@ -38,7 +38,8 @@ public:
 	void pin_hosts_to_upper(std::uint64_t upper_mask);
 
 	// Spawn a guest PPU fiber bound to one host. Returns the fiber task.
-	fiber_task& spawn_guest(thread_base& thread, guest_entry entry, std::string (*describe)(thread_base*) = nullptr);
+	fiber_task& spawn_guest(thread_base& thread, guest_entry entry, std::string (*describe)(thread_base*) = nullptr,
+		void (*poke)(thread_base*) = nullptr);
 
 	std::uint64_t dispatch_count() const noexcept { return m_dispatch.load(std::memory_order_relaxed); }
 
@@ -61,9 +62,13 @@ private:
 		fiber_task* task = nullptr;
 		thread_base* thread = nullptr;
 		std::string (*describe)(thread_base*) = nullptr;
+		void (*poke)(thread_base*) = nullptr;
 		std::atomic<bool> done{false};
 	};
 	void watchdog_main();
+	void ticker_main();
+	std::thread m_ticker;
+	std::uint64_t m_slice_ns = 0;
 	void dump_stall(std::uint64_t idle_ms);
 	std::vector<std::unique_ptr<guest_rec>> m_guests;
 	std::thread m_watchdog;

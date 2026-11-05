@@ -170,7 +170,7 @@ private:
 
 	// Start as a Cell PPU fiber on the two-host scheduler (ARMSX3_CELL_FIBER=1).
 	// entry is named_thread::entry_point — must NOT pthread_exit the host.
-	void start_fiber(u64 (*entry)(thread_base*), std::string (*describe)(thread_base*) = nullptr);
+	void start_fiber(u64 (*entry)(thread_base*), std::string (*describe)(thread_base*) = nullptr, void (*poke)(thread_base*) = nullptr);
 
 	// Called at the thread start
 	void initialize(void (*error_cb)());
@@ -522,6 +522,15 @@ class named_thread final : public Context, result_storage<Context>, thread_base
 		return static_cast<named_thread*>(_base)->entry_point2();
 	}
 
+	// ARMSX3_CELL_FIBER preemption: make the running guest reach a safe point soon.
+	static void cell_fiber_poke(thread_base* _base)
+	{
+		if constexpr (requires (Context& c) { c.cell_fiber_poke(); })
+		{
+			static_cast<Context&>(*static_cast<named_thread*>(_base)).cell_fiber_poke();
+		}
+	}
+
 	// ARMSX3_CELL_FIBER stall dumps: thread name plus the context's dump_misc (diagnostic only).
 	static std::string cell_fiber_describe(thread_base* _base)
 	{
@@ -608,7 +617,7 @@ public:
 		{
 			if (Context::cell_fiber_backend && ::cell::fiber_dispatch_enabled())
 			{
-				thread::start_fiber(&named_thread::entry_point, &named_thread::cell_fiber_describe);
+				thread::start_fiber(&named_thread::entry_point, &named_thread::cell_fiber_describe, &named_thread::cell_fiber_poke);
 				return;
 			}
 		}
@@ -759,7 +768,7 @@ public:
 			{
 				if (Context::cell_fiber_backend && ::cell::fiber_dispatch_enabled())
 				{
-					thread::start_fiber(&named_thread::entry_point, &named_thread::cell_fiber_describe);
+					thread::start_fiber(&named_thread::entry_point, &named_thread::cell_fiber_describe, &named_thread::cell_fiber_poke);
 					return *this;
 				}
 			}

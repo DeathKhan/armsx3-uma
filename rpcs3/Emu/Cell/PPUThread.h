@@ -365,6 +365,10 @@ public:
 	// Opt into Cell PPU fiber backend when ARMSX3_CELL_FIBER=1.
 	static constexpr bool cell_fiber_backend = true;
 
+	// Time-slice preemption (any thread): a non-zero state makes the JIT call
+	// check_state, which consumes this flag and yields the guest fiber.
+	void cell_fiber_poke() { state += cpu_flag::fiber_yield; }
+
 	// For named_thread ctor
 	const struct thread_name_t
 	{

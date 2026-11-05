@@ -58,8 +58,11 @@ inline bool cell_signal(const wait_phase& phase)
 // clock, 0 = none); wakes are sticky, so a wake between the caller's predicate
 // check and the park is never lost.
 void* current_fiber() noexcept;
-void park_fiber(std::uint64_t deadline_ns);
+void park_fiber(std::uint64_t deadline_ns, const void* data = nullptr, std::uint32_t old_value = 0, const void* sync = nullptr);
 void wake_fiber(void* fiber);
 std::uint64_t fiber_now_ns() noexcept;
+// Safe point for time-slice preemption: yields the current guest fiber if the
+// tick asked it to. No-op on native threads.
+void fiber_preempt_point() noexcept;
 }
 

@@ -7,6 +7,8 @@
 #include <chrono>
 #include <cstring>
 #include <stdexcept>
+#include <cstdlib>
+#include <algorithm>
 #include <dlfcn.h>
 
 #if defined(__linux__)
@@ -86,10 +88,28 @@ void ppu_runtime::ensure_started()
 	{
 		m_watchdog_stop = false;
 		m_watchdog = std::thread([this] { watchdog_main(); });
+		// ARMSX3_CELL_SLICE_US (driver_env): guest time slice before a waiting
+		// guest on the same host gets the core. 0 disables preemption.
+		const char* e = std::getenv("ARMSX3_CELL_SLICE_US");
+		m_slice_ns = (e && *e ? std::strtoull(e, nullptr, 10) : 2000) * 1000;
+		if (m_slice_ns)
+			m_ticker = std::thread([this] { ticker_main(); });
+		cell_fiber.notice("ARMSX3_CELL fiber preemption slice=%lluus", static_cast<unsigned long long>(m_slice_ns / 1000));
 	}
 	cell_fiber.notice("ARMSX3_CELL fiber hosts: started count=%u dispatch=%d upper=0x%x",
 		m_scheduler->host_count(), fiber_dispatch_enabled() ? 1 : 0, static_cast<unsigned>(m_upper_mask));
 	request_host_pins_locked();
+}
+
+void ppu_runtime::ticker_main()
+{
+	// 1 kHz is enough for a 2 ms slice; the scan is two locked size checks.
+	while (!m_watchdog_stop.load(std::memory_order_relaxed))
+	{
+		std::this_thread::sleep_for(std::chrono::microseconds(std::min<std::uint64_t>(1000, std::max<std::uint64_t>(m_slice_ns / 2000, 100))));
+		if (auto* s = m_scheduler.get())
+			s->preempt_scan(m_slice_ns);
+	}
 }
 
 void ppu_runtime::watchdog_main()
@@ -119,10 +139,17 @@ void ppu_runtime::watchdog_main()
 void ppu_runtime::dump_stall(std::uint64_t idle_ms)
 {
 	const auto now = scheduler::now_ns();
-	cell_fiber.error("ARMSX3_CELL fiber STALL: no dispatch for %llu ms; parks=%llu wakes=%llu timeouts=%llu guests=%u",
-		static_cast<unsigned long long>(idle_ms), static_cast<unsigned long long>(m_scheduler->park_count()),
+	cell_fiber.error("ARMSX3_CELL fiber STALL: no dispatch for %llu ms; preempts=%llu parks=%llu wakes=%llu timeouts=%llu guests=%u",
+		static_cast<unsigned long long>(idle_ms), static_cast<unsigned long long>(m_scheduler->preempt_count()),
+		static_cast<unsigned long long>(m_scheduler->park_count()),
 		static_cast<unsigned long long>(m_scheduler->wake_count()), static_cast<unsigned long long>(m_scheduler->timeout_count()),
 		static_cast<unsigned>(m_guests.size()));
+	for (unsigned h = 0; h < m_scheduler->host_count(); ++h)
+	{
+		std::size_t ready = 0, timers = 0;
+		m_scheduler->host_depth(h, ready, timers);
+		cell_fiber.error("ARMSX3_CELL fiber host=%u ready=%u timers=%u", h, static_cast<unsigned>(ready), static_cast<unsigned>(timers));
+	}
 	for (auto& g : m_guests)
 	{
 		if (g->done)
@@ -142,10 +169,19 @@ void ppu_runtime::dump_stall(std::uint64_t idle_ms)
 		std::string desc = g->describe ? g->describe(g->thread) : std::string("?");
 		for (auto& c : desc)
 			if (c == '\n') c = '|';
-		cell_fiber.error("ARMSX3_CELL fiber guest host=%u state=%u parked_ms=%llu desc=%s frames:%s",
-			task->host_index(), task->state(),
+		std::string wait;
+		if (const void* data = task->wait_data())
+		{
+			// Guest/emulator words stay mapped while their waiter is alive.
+			const u32 cur = static_cast<const std::atomic<u32>*>(data)->load();
+			const u32 sync = task->wait_sync() ? task->wait_sync()->load() : 0xffffffffu;
+			wait = fmt::format(" wait=0x%x old=0x%x cur=0x%x sync=%u%s", reinterpret_cast<std::uintptr_t>(data), task->wait_old(), cur, sync,
+				cur != task->wait_old() ? " LOST-WAKE?" : "");
+		}
+		cell_fiber.error("ARMSX3_CELL fiber guest host=%u state=%u wake=%d parked_ms=%llu%s desc=%s frames:%s",
+			task->host_index(), task->state(), task->wake_pending() ? 1 : 0,
 			static_cast<unsigned long long>(task->park_ns() ? (now - task->park_ns()) / 1000000 : 0),
-			desc, frames);
+			wait, desc, frames);
 	}
 }
 
@@ -154,6 +190,8 @@ void ppu_runtime::stop()
 	m_watchdog_stop = true;
 	if (m_watchdog.joinable() && m_watchdog.get_id() != std::this_thread::get_id())
 		m_watchdog.join();
+	if (m_ticker.joinable())
+		m_ticker.join();
 	std::lock_guard lock(m_mutex);
 	if (!m_scheduler) return;
 	m_scheduler->stop();
@@ -190,7 +228,7 @@ void ppu_runtime::guest_work(fiber_task& task, void* p)
 	}
 }
 
-fiber_task& ppu_runtime::spawn_guest(thread_base& thread, guest_entry entry, std::string (*describe)(thread_base*))
+fiber_task& ppu_runtime::spawn_guest(thread_base& thread, guest_entry entry, std::string (*describe)(thread_base*), void (*poke)(thread_base*))
 {
 	ensure_started();
 	std::lock_guard lock(m_mutex);
@@ -203,9 +241,12 @@ fiber_task& ppu_runtime::spawn_guest(thread_base& thread, guest_entry entry, std
 	auto rec = std::make_unique<guest_rec>();
 	rec->thread = &thread;
 	rec->describe = describe;
+	rec->poke = poke;
 	// Native PPU threads get 8 MiB stacks on Android; guest HLE and LLVM frames
 	// are deep. Only touched pages are committed.
 	auto& task = m_scheduler->spawn(host, &guest_work, arg, 8 * 1024 * 1024);
+	if (poke)
+		task.set_poke(reinterpret_cast<void (*)(void*)>(poke), &thread);
 	rec->task = &task;
 	m_guests.push_back(std::move(rec));
 	thread.bind_cell_fiber(&task);
@@ -227,10 +268,13 @@ void* current_fiber() noexcept
 	return scheduler::current_task();
 }
 
-void park_fiber(std::uint64_t deadline_ns)
+void park_fiber(std::uint64_t deadline_ns, const void* data, std::uint32_t old_value, const void* sync)
 {
 	if (auto* task = scheduler::current_task())
+	{
+		task->note_wait(data, old_value, static_cast<const std::atomic<std::uint32_t>*>(sync));
 		task->park(deadline_ns);
+	}
 }
 
 void wake_fiber(void* fiber)
@@ -244,5 +288,11 @@ void wake_fiber(void* fiber)
 std::uint64_t fiber_now_ns() noexcept
 {
 	return scheduler::now_ns();
+}
+
+void fiber_preempt_point() noexcept
+{
+	if (auto* task = scheduler::current_task(); task && task->take_preempt())
+		task->yield();
 }
 }

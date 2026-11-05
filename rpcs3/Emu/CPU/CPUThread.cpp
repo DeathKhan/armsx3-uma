@@ -2,6 +2,7 @@
 #include "Utilities/Cell.h"
 #include "Utilities/CellFiberTls.h"
 #include "Utilities/CellScheduler.h"
+#include "Utilities/CellWait.h"
 #include "CPUThread.h"
 #include "CPUDisAsm.h"
 
@@ -72,6 +73,7 @@ void fmt_class_string<cpu_flag>::format(std::string& out, u64 arg)
 		case cpu_flag::dbg_global_pause: return "G-PAUSE";
 		case cpu_flag::dbg_pause: return "PAUSE";
 		case cpu_flag::dbg_step: return "STEP";
+		case cpu_flag::fiber_yield: return "fy";
 		case cpu_flag::__bitset_enum_max: break;
 		}
 
@@ -840,6 +842,9 @@ static atomic_t<u32> s_dummy_atomic = 0;
 
 bool cpu_thread::check_state() noexcept
 {
+	// Guest fiber whose time slice expired while others wait on its host.
+	cell::fiber_preempt_point();
+
 	bool cpu_sleep_called = false;
 	bool cpu_memory_checked = false;
 	bool cpu_can_stop = true;
@@ -903,6 +908,12 @@ bool cpu_thread::check_state() noexcept
 			if (flags & cpu_flag::notify)
 			{
 				flags -= cpu_flag::notify;
+				store = true;
+			}
+
+			if (flags & cpu_flag::fiber_yield)
+			{
+				flags -= cpu_flag::fiber_yield;
 				store = true;
 			}
 

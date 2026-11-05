@@ -1194,7 +1194,7 @@ atomic_wait_engine::wait(const void* data, u32 old_value, u64 timeout, atomic_wa
 			// Guest fiber: park on the scheduler instead of FUTEX_WAIT so the
 			// host runs other guests. alert_native wakes it; a wake between the
 			// sync check above and the park is sticky, not lost.
-			cell::park_fiber(timeout + 1 ? cell::fiber_now_ns() + native_timeout : 0);
+			cell::park_fiber(timeout + 1 ? cell::fiber_now_ns() + native_timeout : 0, data, old_value, &cond->sync);
 		}
 		else
 		{

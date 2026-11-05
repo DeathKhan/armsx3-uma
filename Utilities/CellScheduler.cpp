@@ -236,6 +236,41 @@ void scheduler::add_timer(fiber_task& task, std::uint64_t deadline_ns)
 	std::push_heap(host.timers.begin(), host.timers.end(), std::greater<>{});
 }
 
+unsigned scheduler::preempt_scan(std::uint64_t slice_ns)
+{
+	unsigned sent = 0;
+	const std::uint64_t now = now_ns();
+	for (auto& h : m_hosts)
+	{
+		auto& host = *h;
+		fiber_task* task = host.running.load(std::memory_order_acquire);
+		if (!task || !task->m_poke)
+			continue;
+		if (now - host.run_start_ns.load(std::memory_order_relaxed) < slice_ns)
+			continue;
+		bool others = false;
+		{
+			std::lock_guard lock(host.mutex);
+			others = !host.ready.empty() || (!host.timers.empty() && host.timers.front().first <= now);
+		}
+		if (!others || task->m_preempt.exchange(true))
+			continue;
+		// The task stays alive while it is running on this host.
+		task->m_poke(task->m_poke_arg);
+		m_preempts.fetch_add(1, std::memory_order_relaxed);
+		sent++;
+	}
+	return sent;
+}
+
+void scheduler::host_depth(unsigned host_index, std::size_t& ready, std::size_t& timers)
+{
+	auto& host = *m_hosts.at(host_index);
+	std::lock_guard lock(host.mutex);
+	ready = host.ready.size();
+	timers = host.timers.size();
+}
+
 void scheduler::signal_host(unsigned host_index)
 {
 	auto& host = *m_hosts.at(host_index);
@@ -291,6 +326,33 @@ void scheduler::host_main(host_state& host)
 	fiber_tls::save(host.pristine_tls.data());
 
 	std::vector<fiber_task*> expired;
+
+	// Wake every guest whose timed park is due. Runs on every scheduling pass,
+	// not only when the host idles: a busy host must still release timed waits.
+	// Called with the host lock held; drops it around the wakes.
+	const auto expire_timers = [&](std::unique_lock<std::mutex>& lock)
+	{
+		const std::uint64_t now = now_ns();
+		while (!host.timers.empty() && host.timers.front().first <= now)
+		{
+			std::pop_heap(host.timers.begin(), host.timers.end(), std::greater<>{});
+			expired.push_back(host.timers.back().second);
+			host.timers.pop_back();
+		}
+		if (expired.empty())
+			return;
+		lock.unlock();
+		for (auto* t : expired)
+		{
+			// Stale entries (woken early) only cause a spurious wake.
+			if (t->m_state.load(std::memory_order_acquire) != fiber_task::state_run)
+				m_timeouts.fetch_add(1, std::memory_order_relaxed);
+			wake(*t);
+		}
+		expired.clear();
+		lock.lock();
+	};
+
 	for (;;)
 	{
 		fiber_task* task = nullptr;
@@ -300,6 +362,7 @@ void scheduler::host_main(host_state& host)
 			{
 				if (host.stop && host.ready.empty())
 					return;
+				expire_timers(lock);
 				if (!host.ready.empty())
 					break;
 				if (host.timers.empty())
@@ -310,26 +373,7 @@ void scheduler::host_main(host_state& host)
 				const std::uint64_t now = now_ns();
 				const std::uint64_t first = host.timers.front().first;
 				if (first > now)
-				{
 					host.cv.wait_for(lock, std::chrono::nanoseconds(first - now));
-					continue;
-				}
-				while (!host.timers.empty() && host.timers.front().first <= now)
-				{
-					std::pop_heap(host.timers.begin(), host.timers.end(), std::greater<>{});
-					expired.push_back(host.timers.back().second);
-					host.timers.pop_back();
-				}
-				lock.unlock();
-				for (auto* t : expired)
-				{
-					// Stale entries (woken early) only cause a spurious wake.
-					if (t->m_state.load(std::memory_order_acquire) != fiber_task::state_run)
-						m_timeouts.fetch_add(1, std::memory_order_relaxed);
-					wake(*t);
-				}
-				expired.clear();
-				lock.lock();
 			}
 			task = host.ready.front();
 			host.ready.erase(host.ready.begin());
@@ -343,6 +387,9 @@ void scheduler::host_main(host_state& host)
 			task->m_tls = host.pristine_tls;
 		fiber_tls::load(task->m_tls.data());
 		t_current = task;
+		task->m_preempt.store(false, std::memory_order_relaxed);
+		host.run_start_ns.store(now_ns(), std::memory_order_relaxed);
+		host.running.store(task, std::memory_order_release);
 		bool alive = false;
 		try
 		{
@@ -351,12 +398,14 @@ void scheduler::host_main(host_state& host)
 		}
 		catch (...)
 		{
+			host.running.store(nullptr, std::memory_order_release);
 			fiber_tls::save(task->m_tls.data());
 			fiber_tls::load(host.pristine_tls.data());
 			release(*task, ticket);
 			t_current = nullptr;
 			throw;
 		}
+		host.running.store(nullptr, std::memory_order_release);
 		fiber_tls::save(task->m_tls.data());
 		fiber_tls::load(host.pristine_tls.data());
 		release(*task, ticket);
@@ -370,7 +419,9 @@ void scheduler::host_main(host_state& host)
 		if (task->m_state.compare_exchange_strong(expected, fiber_task::state_parked))
 			continue;
 
-		std::lock_guard lock(host.mutex);
+		// Requeue a yielded/preempted guest behind any guest whose timer is due.
+		std::unique_lock lock(host.mutex);
+		expire_timers(lock);
 		host.ready.push_back(task);
 	}
 }

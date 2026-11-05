@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "Utilities/Cell.h"
 #include "CPUThread.h"
 #include "CPUDisAsm.h"
 
@@ -655,7 +656,9 @@ void cpu_thread::operator()()
 
 	g_tls_this_thread = this;
 
-	if (g_cfg.core.thread_scheduler != thread_scheduler_mode::os)
+	thread_ctrl::apply_cell_policy(get_class());
+
+	if (g_cfg.core.thread_scheduler != thread_scheduler_mode::os && !cell::enabled())
 	{
 		thread_ctrl::set_thread_affinity_mask(thread_ctrl::get_affinity_mask(get_class()));
 	}

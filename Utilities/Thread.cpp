@@ -9,6 +9,8 @@
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/system_config.h"
 #include "Thread.h"
+#include "Cell.h"
+#include <atomic>
 #include <bit>
 #include <cstring>
 #include <cerrno>
@@ -4051,6 +4053,8 @@ void thread_base::initialize(void (*error_cb)())
 		return true;
 	});
 
+	thread_ctrl::apply_cell_policy(thread_class::general);
+
 	set_name(thread_ctrl::get_name_cached());
 }
 
@@ -4911,8 +4915,117 @@ void thread_ctrl::detect_cpu_layout()
 	}
 }
 
+namespace
+{
+	const cell::topology& get_cell_topology(u64 allowed)
+	{
+		static const cell::topology layout = [allowed]
+		{
+			cell::topology result;
+#if defined(ARCH_ARM64) && defined(__linux__)
+			result = cell::topology::detect(get_arm_core_capacities(), allowed);
+#endif
+			if (result)
+				sig_log.notice("ARMSX3_CELL topology: SPU/helpers=0x%x PPU/RSX=0x%x", result.lower, result.upper);
+			else
+				sig_log.notice("ARMSX3_CELL topology: unsupported/restricted capacity layout; keeping generic affinity");
+			return result;
+		}();
+		return layout;
+	}
+
+	// A live host SPU leases one lower-tier core. This survives repeated mask queries;
+	// the lease is released at host-thread exit, including emulator stop/restart.
+	std::atomic<u32> cell_spu_occupants[64]{};
+	struct cell_spu_lease
+	{
+		u32 core = 64;
+		~cell_spu_lease()
+		{
+			if (core < 64) cell_spu_occupants[core].fetch_sub(1, std::memory_order_relaxed);
+		}
+		u64 acquire(u64 allowed)
+		{
+			if (core < 64) return u64{1} << core;
+			// Prefer an idle core with CAS so concurrently starting SPUs cannot
+			// all observe the same least-loaded core. Extra raw SPUs share a tier.
+			for (u32 i = 0; i != 64; ++i)
+			{
+				if (!(allowed & (u64{1} << i))) continue;
+				u32 zero = 0;
+				if (cell_spu_occupants[i].compare_exchange_strong(zero, 1, std::memory_order_relaxed))
+				{
+					core = i;
+					return u64{1} << core;
+				}
+			}
+			u32 best = 64, count = UINT32_MAX;
+			for (u32 i = 0; i != 64; ++i)
+			{
+				if (!(allowed & (u64{1} << i))) continue;
+				const u32 load = cell_spu_occupants[i].load(std::memory_order_relaxed);
+				if (load < count) { best = i; count = load; }
+			}
+			if (best == 64) return 0;
+			cell_spu_occupants[best].fetch_add(1, std::memory_order_relaxed);
+			core = best;
+			return u64{1} << core;
+		}
+	};
+}
+
+void thread_ctrl::apply_cell_policy(thread_class group)
+{
+	if (!cell::enabled()) return;
+	cell::waiter_enabled() = group == thread_class::ppu || group == thread_class::spu;
+	const auto& layout = get_cell_topology(process_affinity_mask);
+	if (!layout) return;
+	set_thread_affinity_mask(get_affinity_mask(group));
+#if defined(ARCH_ARM64) && defined(__linux__) && defined(SYS_sched_getattr) && defined(SYS_sched_setattr)
+	// Preserve nice/policy/deadline fields: only change uclamp bounds. A helper
+	// starts capped at 25%; promoted CPU/RSX threads restore the full upper bound.
+	// Kernels/SELinux may reject this unprivileged hint; affinity still applies.
+	struct cell_sched_attr
+	{
+		u32 size;
+		u32 policy;
+		u64 flags;
+		s32 nice;
+		u32 priority;
+		u64 runtime, deadline, period;
+		u32 util_min, util_max;
+	} attr{};
+	attr.size = sizeof(attr);
+	if (::syscall(SYS_sched_getattr, 0, &attr, sizeof(attr), 0) == 0)
+	{
+		attr.flags |= 0x20 | 0x40; // SCHED_FLAG_UTIL_CLAMP_MIN/MAX
+		attr.util_min = 0;
+		attr.util_max = group == thread_class::general ? 256 : 1024;
+		if (::syscall(SYS_sched_setattr, 0, &attr, 0) != 0)
+		{
+			static std::atomic<bool> warned{false};
+			if (!warned.exchange(true)) sig_log.warning("ARMSX3_CELL uclamp unavailable (errno %d)", errno);
+		}
+	}
+#endif
+}
+
 u64 thread_ctrl::get_affinity_mask(thread_class group)
 {
+	if (cell::enabled())
+	{
+		const auto& layout = get_cell_topology(process_affinity_mask);
+		if (layout)
+		{
+			if (group == thread_class::spu)
+			{
+				static thread_local cell_spu_lease lease;
+				return lease.acquire(layout.lower);
+			}
+			return group == thread_class::ppu || group == thread_class::rsx ? layout.upper : layout.lower;
+		}
+		return process_affinity_mask;
+	}
 	detect_cpu_layout();
 
 	if (const auto thread_count = utils::get_thread_count())
@@ -5366,11 +5479,16 @@ u64 thread_ctrl::get_thread_affinity_mask()
 
 	sig_log.error("Failed to get thread affinity mask.");
 	return 0;
-#elif !defined(ANDROID) && (defined(__linux__) || defined(__DragonFly__) || defined(__FreeBSD__))
+#elif defined(__linux__) || defined(__DragonFly__) || defined(__FreeBSD__)
 	cpu_set_t cs;
 	CPU_ZERO(&cs);
 
-	if (int err = pthread_getaffinity_np(pthread_self(), sizeof(cpu_set_t), &cs))
+#ifdef ANDROID
+	const int err = sched_getaffinity(0, sizeof(cpu_set_t), &cs) == 0 ? 0 : errno;
+#else
+	const int err = pthread_getaffinity_np(pthread_self(), sizeof(cpu_set_t), &cs);
+#endif
+	if (err)
 	{
 		sig_log.error("Failed to get thread affinity mask: error %d.", err);
 		return 0;

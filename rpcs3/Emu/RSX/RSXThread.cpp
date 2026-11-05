@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "Utilities/Cell.h"
 #include "RSXThread.h"
 #include "Emu/android_app_state.h"
 
@@ -873,7 +874,9 @@ namespace rsx
 		// Raise priority above other threads
 		thread_ctrl::scoped_priority high_prio(+1);
 
-		if (g_cfg.core.thread_scheduler != thread_scheduler_mode::os)
+		thread_ctrl::apply_cell_policy(thread_class::rsx);
+
+		if (g_cfg.core.thread_scheduler != thread_scheduler_mode::os && !cell::enabled())
 		{
 			thread_ctrl::set_thread_affinity_mask(thread_ctrl::get_affinity_mask(thread_class::rsx));
 		}

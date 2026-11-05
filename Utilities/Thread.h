@@ -348,6 +348,9 @@ public:
 	// Returns a core affinity mask. Set whether to generate the high priority set or not
 	static u64 get_affinity_mask(thread_class group);
 
+	// Cell placement is independent of the legacy scheduler setting.
+	static void apply_cell_policy(thread_class group);
+
 	// Sets the native thread priority
 	static void set_native_priority(int priority);
 

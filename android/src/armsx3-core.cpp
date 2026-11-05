@@ -96,6 +96,8 @@
 #include <Emu/Cell/Modules/cellSaveData.h>
 #include <Emu/Cell/Modules/sceNpTrophy.h>
 
+#include "Utilities/Cell.h"
+
 #include <algorithm>
 #include <android/log.h>
 #include <android/native_window.h>
@@ -4760,6 +4762,12 @@ extern "C" bool _armsx3_initialize(std::string_view rootDir,
       }
     }
   }
+
+  // Publish runtime configuration only after driver_env has been applied. Some
+  // housekeeping named_threads start above and must not freeze the switch early.
+  cell::initialize();
+  armsx3_android.notice("ARMSX3_CELL: %s (checkpoint: topology and registered waits)",
+                         cell::enabled() ? "enabled" : "disabled");
 
   logs::stored_message ver{armsx3_android.always()};
   ver.text = fmt::format("ARMSX3 v%s", rpcs3::get_version().to_string());

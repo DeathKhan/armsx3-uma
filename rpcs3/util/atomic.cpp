@@ -1042,6 +1042,7 @@ atomic_wait_engine::wait(const void* data, u32 old_value, u64 timeout, atomic_wa
 #endif
 	const u64 cell_start = cell_events ? utils::get_tsc() : 0;
 	u32 cell_immediate_wakes = 0;
+	u32 cell_noop_streak = 0;
 	const u64 cell_budget_ns = std::min<u64>(timeout, 3'000'000);
 	const u64 cell_budget_ticks = cell_events ? (utils::get_tsc_freq() / 1000) * (cell_budget_ns / 1000) / 1000 : 0;
 	cond->cell_wait.begin(cell_events && cell_budget_ticks);
@@ -1105,34 +1106,36 @@ atomic_wait_engine::wait(const void* data, u32 old_value, u64 timeout, atomic_wa
 				// A registered waiter receives immediate SEV from its notifier;
 				// EVTSTRM also bounds spurious/no-notifier wake latency. Recheck
 				// the guest predicates and cancellation callbacks on every wake.
-				// Oryon WFE without an exclusive monitor can return immediately
-				// when the event register is already set. Do not burn the full
-				// multi-ms budget as a userspace spin -- that path measured ~0.9
-				// core per SPU and ~773 Mcycles/frame on LBP. A short streak of
-				// no-op WFEs hands off to futex early.
+				// Oryon WFE without an exclusive monitor returns immediately when
+				// the event latch is already set (CNTVCT sample overhead alone can
+				// exceed 1 us, so a 1 us floor never tripped). Do not burn the
+				// multi-ms budget as a spin -- measured ~0.9 core/SPU and 773-951
+				// Mcycles/frame on LBP. Treat sub-~50 us wakes as no-ops; after 8
+				// no-ops or 32 total WFEs in this wait, hand off to futex.
 				const u64 wfe_t0 = utils::get_tsc();
 				cell::cell_wait();
 				const u64 wfe_dt = utils::get_tsc() - wfe_t0;
-				const u64 min_useful_ticks = std::max<u64>(1, utils::get_tsc_freq() / 1000000); // ~1 us
+				const u64 min_useful_ticks = std::max<u64>(1, utils::get_tsc_freq() / 20000); // ~50 us
+				++cell_immediate_wakes;
 				if (wfe_dt < min_useful_ticks)
 				{
-					if (++cell_immediate_wakes >= 64)
-					{
-						cond->cell_wait.handoff_to_native();
-					}
-					else if (!s_tls_wait_cb(data, ++attempts, stamp0))
-					{
-						break;
-					}
-					else
-					{
-						continue;
-					}
+					++cell_noop_streak;
 				}
 				else
 				{
-					cell_immediate_wakes = 0;
-					if (!s_tls_wait_cb(data, ++attempts, stamp0)) break;
+					cell_noop_streak = 0;
+				}
+				if (cell_noop_streak >= 8 || cell_immediate_wakes >= 32)
+				{
+					cond->cell_wait.handoff_to_native();
+					cell_noop_streak = 0;
+				}
+				else if (!s_tls_wait_cb(data, ++attempts, stamp0))
+				{
+					break;
+				}
+				else
+				{
 					continue;
 				}
 			}

@@ -55,6 +55,7 @@ static bool has_waitv()
 #endif
 
 #include <utility>
+#include <algorithm>
 #include <cstdint>
 #include <array>
 #include <random>
@@ -1040,6 +1041,7 @@ atomic_wait_engine::wait(const void* data, u32 old_value, u64 timeout, atomic_wa
 	cell_events = cell::event_wait_enabled(timeout, utils::has_wfe_event_stream());
 #endif
 	const u64 cell_start = cell_events ? utils::get_tsc() : 0;
+	u32 cell_immediate_wakes = 0;
 	const u64 cell_budget_ns = std::min<u64>(timeout, 3'000'000);
 	const u64 cell_budget_ticks = cell_events ? (utils::get_tsc_freq() / 1000) * (cell_budget_ns / 1000) / 1000 : 0;
 	cond->cell_wait.begin(cell_events && cell_budget_ticks);
@@ -1103,17 +1105,48 @@ atomic_wait_engine::wait(const void* data, u32 old_value, u64 timeout, atomic_wa
 				// A registered waiter receives immediate SEV from its notifier;
 				// EVTSTRM also bounds spurious/no-notifier wake latency. Recheck
 				// the guest predicates and cancellation callbacks on every wake.
+				// Oryon WFE without an exclusive monitor can return immediately
+				// when the event register is already set. Do not burn the full
+				// multi-ms budget as a userspace spin -- that path measured ~0.9
+				// core per SPU and ~773 Mcycles/frame on LBP. A short streak of
+				// no-op WFEs hands off to futex early.
+				const u64 wfe_t0 = utils::get_tsc();
 				cell::cell_wait();
-				if (!s_tls_wait_cb(data, ++attempts, stamp0)) break;
-				continue;
+				const u64 wfe_dt = utils::get_tsc() - wfe_t0;
+				const u64 min_useful_ticks = std::max<u64>(1, utils::get_tsc_freq() / 1000000); // ~1 us
+				if (wfe_dt < min_useful_ticks)
+				{
+					if (++cell_immediate_wakes >= 64)
+					{
+						cond->cell_wait.handoff_to_native();
+					}
+					else if (!s_tls_wait_cb(data, ++attempts, stamp0))
+					{
+						break;
+					}
+					else
+					{
+						continue;
+					}
+				}
+				else
+				{
+					cell_immediate_wakes = 0;
+					if (!s_tls_wait_cb(data, ++attempts, stamp0)) break;
+					continue;
+				}
 			}
-			cond->cell_wait.handoff_to_native();
+			if (cond->cell_wait.event_mode())
+			{
+				cond->cell_wait.handoff_to_native();
+			}
 			// Recheck after publishing native mode, before taking a kernel wait.
+			const u64 elapsed_after = utils::get_tsc() - cell_start;
 			if (cond->sync.load() > 1 && !cond->set_sleep()) break;
 			if (!ptr_cmp(data, old_value, ext)) break;
 			if (timeout + 1 && !s_tls_one_time_wait_cb)
 			{
-				const u64 elapsed_ns = elapsed * 1'000'000'000 / utils::get_tsc_freq();
+				const u64 elapsed_ns = elapsed_after * 1'000'000'000 / utils::get_tsc_freq();
 				if (elapsed_ns >= timeout) break;
 				native_timeout -= elapsed_ns;
 			}

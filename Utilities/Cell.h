@@ -45,6 +45,22 @@ inline bool& waiter_enabled()
 }
 
 
+class scoped_native_wait
+{
+	const bool m_previous;
+public:
+	scoped_native_wait() : m_previous(waiter_enabled()) { waiter_enabled() = false; }
+	~scoped_native_wait() { waiter_enabled() = m_previous; }
+	scoped_native_wait(const scoped_native_wait&) = delete;
+	scoped_native_wait& operator=(const scoped_native_wait&) = delete;
+};
+
+inline bool event_wait_enabled(std::uint64_t timeout_ns, bool event_stream)
+{
+	// A sub-200 us timeout cannot absorb the periodic event stream's wake bound.
+	return waiter_enabled() && enabled() && event_stream && timeout_ns >= 200'000;
+}
+
 struct topology
 {
 	std::uint64_t lower = 0;

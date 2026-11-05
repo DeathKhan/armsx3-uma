@@ -1,4 +1,7 @@
 #include "atomic.hpp"
+#include "Utilities/Cell.h"
+#include "Utilities/CellWait.h"
+#include "sysinfo.hpp"
 
 #if defined(ARCH_ARM64) && (defined(__linux__) || defined(_WIN32)) && !defined(ARM_FEATURE_LSE2)
 #include "sysinfo.hpp"
@@ -184,6 +187,7 @@ namespace
 		u64 tsc0;
 		u16 link;
 		atomic_t<u32> sync;
+		cell::wait_phase cell_wait;
 
 #ifdef USE_STD
 		// Standard CV/mutex pair (often contains pthread_cond_t/pthread_mutex_t)
@@ -223,6 +227,7 @@ namespace
 			tsc0 = 0;
 			link = 0;
 			sync.release(0);
+			cell_wait.enter_native();
 			oldv = 0;
 
 #ifdef USE_STD
@@ -295,6 +300,7 @@ namespace
 		void alert_native()
 		{
 #ifdef USE_FUTEX
+			if (cell::cell_signal(cell_wait)) return;
 			// Use "wake all" arg for robustness, only 1 thread is expected
 			futex(&sync, FUTEX_WAKE_PRIVATE, 0x7fff'ffff);
 #elif defined(USE_STD)
@@ -1026,6 +1032,17 @@ atomic_wait_engine::wait(const void* data, u32 old_value, u64 timeout, atomic_wa
 	cond->oldv = old_value;
 	cond->tsc0 = stamp0;
 
+	// WFE is bounded only on kernels with the architected event stream enabled.
+	// A long-idle wait becomes a normal futex after at most 3 ms. This budget is
+	// per wait, not an unbounded replacement for idle sleeps.
+	bool cell_events = false;
+#if defined(ARCH_ARM64) && defined(__linux__)
+	cell_events = cell::event_wait_enabled(timeout, utils::has_wfe_event_stream());
+#endif
+	const u64 cell_start = cell_events ? utils::get_tsc() : 0;
+	const u64 cell_budget_ns = std::min<u64>(timeout, 3'000'000);
+	const u64 cell_budget_ticks = cell_events ? (utils::get_tsc_freq() / 1000) * (cell_budget_ns / 1000) / 1000 : 0;
+	cond->cell_wait.begin(cell_events && cell_budget_ticks);
 	cond->sync.release(1);
 
 	for (u32 i = 0; i < ext_size; i++)
@@ -1075,9 +1092,36 @@ atomic_wait_engine::wait(const void* data, u32 old_value, u64 timeout, atomic_wa
 		}
 
 #ifdef USE_FUTEX
+		u64 native_timeout = timeout;
+#if defined(ARCH_ARM64) && defined(__linux__)
+		if (cond->cell_wait.event_mode())
+		{
+			if (cond->sync.load() > 1 && !cond->set_sleep()) break;
+			const u64 elapsed = utils::get_tsc() - cell_start;
+			if (elapsed < cell_budget_ticks)
+			{
+				// A registered waiter receives immediate SEV from its notifier;
+				// EVTSTRM also bounds spurious/no-notifier wake latency. Recheck
+				// the guest predicates and cancellation callbacks on every wake.
+				cell::cell_wait();
+				if (!s_tls_wait_cb(data, ++attempts, stamp0)) break;
+				continue;
+			}
+			cond->cell_wait.handoff_to_native();
+			// Recheck after publishing native mode, before taking a kernel wait.
+			if (cond->sync.load() > 1 && !cond->set_sleep()) break;
+			if (!ptr_cmp(data, old_value, ext)) break;
+			if (timeout + 1 && !s_tls_one_time_wait_cb)
+			{
+				const u64 elapsed_ns = elapsed * 1'000'000'000 / utils::get_tsc_freq();
+				if (elapsed_ns >= timeout) break;
+				native_timeout -= elapsed_ns;
+			}
+		}
+#endif
 		struct timespec ts;
-		ts.tv_sec  = timeout / 1'000'000'000;
-		ts.tv_nsec = timeout % 1'000'000'000;
+		ts.tv_sec  = native_timeout / 1'000'000'000;
+		ts.tv_nsec = native_timeout % 1'000'000'000;
 
 		const u32 val = cond->sync;
 

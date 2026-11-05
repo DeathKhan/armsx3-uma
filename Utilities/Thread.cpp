@@ -4276,6 +4276,7 @@ thread_state thread_ctrl::state()
 
 void thread_ctrl::wait_for(u64 usec, [[maybe_unused]] bool alert /* true */)
 {
+	const cell::scoped_native_wait native_wait;
 	if (!usec)
 	{
 		return;
@@ -4386,6 +4387,7 @@ void thread_ctrl::wait_until(u64* wait_time, u64 add_time, u64 min_wait, bool up
 
 void thread_ctrl::wait_for_accurate(u64 usec)
 {
+	const cell::scoped_native_wait native_wait;
 	if (!usec)
 	{
 		return;

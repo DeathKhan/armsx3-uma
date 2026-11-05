@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "Utilities/Cell.h"
 #include "Emu/System.h"
 #include "Emu/system_config.h"
 #include "Emu/Memory/vm_ptr.h"
@@ -2522,6 +2523,8 @@ waitpkg_func static void __tpause(u32 cycles, u32 cstate)
 
 bool lv2_obj::wait_timeout(u64 usec, ppu_thread* cpu, bool scale, bool is_usleep)
 {
+	// Timer/usleep pacing remains a kernel sleep even on a Cell PPU host.
+	const cell::scoped_native_wait native_wait;
 	static_assert(u64{umax} / max_timeout >= 100, "max timeout is not valid for scaling");
 
 	const u64 start_time = get_system_time();

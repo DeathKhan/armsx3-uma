@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "tools/cell/spu-replay/runtime.hpp"
 
 #include <charconv>
 #include <map>
@@ -3051,6 +3052,12 @@ void spu_recompiler_base::branch(spu_thread& spu, void*, u8* rip)
 
 void spu_recompiler_base::old_interpreter(spu_thread& spu, void* ls, u8* /*rip*/)
 {
+	// An LLVM replay may not silently pass via the interpreter or execute I/O.
+	if (cell_replay::enabled())
+	{
+		cell_replay::reject_fallback(spu);
+	}
+
 	// Also reachable with a recompiler selected, as the per-thread fallback for a block that
 	// cannot be compiled. See spu_thread::cpu_task.
 	//

@@ -1,4 +1,6 @@
 #include "stdafx.h"
+#include "tools/cell/spu-replay/runtime.hpp"
+#include "tools/cell/spu-replay/segment.hpp"
 #include <charconv>
 #include "SPURecompiler.h"
 
@@ -1939,6 +1941,12 @@ public:
 			// after the XER fix). Bump this letter whenever ARM64 SPU codegen changes semantics.
 			fmt::append(m_hash, "__spu-a-0x%05x-%s", func.entry_point, fmt::base57(output));
 
+			// Debug instrumentation must never reuse or publish a normal object identity.
+			if (cell_replay::enabled())
+			{
+				m_hash += "-cell-replay-boundary-v1";
+			}
+
 #ifdef ARCH_ARM64
 			// The ARM64 retry recompiles the SAME guest function with different codegen -- it
 			// drops tbl2, then fma, to get past the register scavenger. Those attempts produce
@@ -3506,6 +3514,16 @@ public:
 					}
 
 					const u32 op = std::bit_cast<be_t<u32>>(func.data[(m_pos - start) / 4]);
+
+					// Compile-time gate: disabled mode emits no additional LLVM IR. Stop
+					// before the original boundary, including optimized inline channels.
+					// All normal arithmetic/LS emitters and analyzer attributes stay on.
+					if (cell_replay::enabled() && cell_replay::boundary(op))
+					{
+						update_pc();
+						ensure_gpr_stores();
+						call("spu_cell_replay_boundary", &cell_replay::intercept_boundary, m_thread, m_ir->getInt32(op));
+					}
 					const auto itype = g_spu_itype.decode(op);
 
 					if (itype & spu_itype::branch)
@@ -3661,6 +3679,16 @@ public:
 					}
 
 					const u32 op = std::bit_cast<be_t<u32>>(func.data[(m_pos - start) / 4]);
+
+					// Compile-time gate: disabled mode emits no additional LLVM IR. Stop
+					// before the original boundary, including optimized inline channels.
+					// All normal arithmetic/LS emitters and analyzer attributes stay on.
+					if (cell_replay::enabled() && cell_replay::boundary(op))
+					{
+						update_pc();
+						ensure_gpr_stores();
+						call("spu_cell_replay_boundary", &cell_replay::intercept_boundary, m_thread, m_ir->getInt32(op));
+					}
 
 					if (!op)
 					{
@@ -4982,6 +5010,11 @@ public:
 
 	static bool exec_check_state(spu_thread* _spu)
 	{
+		if (cell_replay::enabled())
+		{
+			cell_replay::on_state_check(*_spu);
+		}
+
 		// Compiled code only calls this at a state check, after storing pc for the exact
 		// instruction it stopped at. Unless the code marked the thread unsavable around the call,
 		// every guest register is in memory too. That is all cpu_work needs to take a busy-checked

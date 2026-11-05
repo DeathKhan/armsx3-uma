@@ -1713,6 +1713,8 @@ void spu_thread::cpu_return()
 
 extern thread_local std::string(*g_tls_log_prefix)();
 
+#include "tools/cell/spu-replay/runtime.inc"
+
 void spu_thread::cpu_task()
 {
 #ifdef __APPLE__
@@ -1763,6 +1765,11 @@ void spu_thread::cpu_task()
 	{
 		// Update thread name (spu_thread::lv2_id update)
 		thread_ctrl::set_name(*group->threads[group->threads_map[index]], thread_name);
+	}
+
+	if (cell_replay::enabled() && cell_replay::run_isolated(*this))
+	{
+		return;
 	}
 
 	constexpr u32 invalid_spurs = 0u - 0x80;

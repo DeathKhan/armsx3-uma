@@ -42,10 +42,12 @@ public:
 
 private:
 	ppu_runtime() = default;
+	void request_host_pins_locked();
 	std::mutex m_mutex;
 	std::unique_ptr<scheduler> m_scheduler;
 	std::atomic<bool> m_live{false};
 	std::uint64_t m_upper_mask{0};
+	bool m_pinned{false};
 };
 
 void ppu_runtime_on_cell_policy(std::uint64_t upper_mask);

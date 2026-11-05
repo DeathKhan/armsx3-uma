@@ -391,8 +391,9 @@ public:
 	static bool is_main();
 
 private:
-	// Miscellaneous
-	static const u64 process_affinity_mask;
+	// process affinity is read lazily via get_process_affinity_mask(); a
+	// DECLARE-time cache from the .so loader thread was wrong on Android when
+	// that thread was cpuset-restricted (topology then stuck at upper=0).
 };
 
 #if defined(__has_cpp_attribute)

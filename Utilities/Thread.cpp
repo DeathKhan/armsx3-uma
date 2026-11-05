@@ -12,6 +12,8 @@
 #include "Cell.h"
 #include "CellPpuRuntime.h"
 #include <atomic>
+#include <mutex>
+#include <algorithm>
 #include <bit>
 #include <cstring>
 #include <cerrno>
@@ -69,6 +71,8 @@ DYNAMIC_IMPORT_RENAME("Kernel32.dll", SetThreadDescriptionImport, "SetThreadDesc
 #include <time.h>
 #endif
 #ifdef __linux__
+#include <sched.h>
+#include <fcntl.h>
 #include <sys/syscall.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
@@ -4922,18 +4926,68 @@ namespace
 {
 	const cell::topology& get_cell_topology(u64 allowed)
 	{
-		static const cell::topology layout = [allowed]
-		{
-			cell::topology result;
+		// Do not poison a process-lifetime cache with the first restricted/empty
+		// mask (DECLARE-time process_affinity from a cpuset-limited loader thread
+		// previously left fiber hosts at upper=0x0 despite 792×6/1024×2 capacity).
+		static std::mutex mu;
+		static cell::topology layout{};
+		static bool success = false;
+		static u64 used_allowed = 0;
+
+		std::lock_guard lock(mu);
+		if (success)
+			return layout;
+
+		cell::topology result;
 #if defined(ARCH_ARM64) && defined(__linux__)
-			result = cell::topology::detect(get_arm_core_capacities(), allowed);
+		const auto& caps = get_arm_core_capacities();
+		u64 usable = allowed;
+		u64 online = 0;
+		u32 low = UINT32_MAX, high = 0;
+		for (u32 i = 0; i != 64; ++i)
+		{
+			if (!caps[i]) continue;
+			online |= u64{1} << i;
+			if (caps[i] < low) low = caps[i];
+			if (caps[i] > high) high = caps[i];
+		}
+		// Empty/restricted affinity: fall back to every core that reported capacity.
+		if (!usable)
+			usable = online;
+		else
+			usable &= online ? online : usable;
+		result = cell::topology::detect(caps, usable);
+		// A stale thread-affinity mask (e.g. little-only 0x3f) must not permanently
+		// disable Oryon placement when sysfs capacity clearly shows two tiers.
+		if (!result && online && usable != online)
+		{
+			if (const auto fallback = cell::topology::detect(caps, online))
+			{
+				result = fallback;
+				usable = online;
+				sig_log.notice("ARMSX3_CELL topology: recovered via capacity online mask (allowed=0x%x was insufficient)", allowed);
+			}
+		}
+		if (result)
+		{
+			sig_log.notice("ARMSX3_CELL topology: SPU/helpers=0x%x PPU/RSX=0x%x (allowed=0x%x usable=0x%x)",
+				result.lower, result.upper, allowed, usable);
+		}
+		else
+		{
+			sig_log.notice("ARMSX3_CELL topology: unsupported/restricted capacity layout; keeping generic affinity (allowed=0x%x usable=0x%x online=0x%x cap=%u..%u)",
+				allowed, usable, online, low == UINT32_MAX ? 0 : low, high);
+		}
+#else
+		(void)allowed;
+		sig_log.notice("ARMSX3_CELL topology: unsupported/restricted capacity layout; keeping generic affinity");
 #endif
-			if (result)
-				sig_log.notice("ARMSX3_CELL topology: SPU/helpers=0x%x PPU/RSX=0x%x", result.lower, result.upper);
-			else
-				sig_log.notice("ARMSX3_CELL topology: unsupported/restricted capacity layout; keeping generic affinity");
-			return result;
-		}();
+		layout = result;
+		used_allowed = allowed;
+		if (result)
+			success = true;
+		else
+			(void)used_allowed; // keep last attempt; next caller may pass a wider mask
 		return layout;
 	}
 
@@ -4981,7 +5035,7 @@ void thread_ctrl::apply_cell_policy(thread_class group)
 {
 	if (!cell::enabled()) return;
 	cell::waiter_enabled() = group == thread_class::ppu || group == thread_class::spu;
-	const auto& layout = get_cell_topology(process_affinity_mask);
+	const auto& layout = get_cell_topology(get_process_affinity_mask());
 	if (layout)
 		cell::ppu_runtime_on_cell_policy(layout.upper);
 	else
@@ -5021,7 +5075,7 @@ u64 thread_ctrl::get_affinity_mask(thread_class group)
 {
 	if (cell::enabled())
 	{
-		const auto& layout = get_cell_topology(process_affinity_mask);
+		const auto& layout = get_cell_topology(get_process_affinity_mask());
 		if (layout)
 		{
 			if (group == thread_class::spu)
@@ -5031,13 +5085,13 @@ u64 thread_ctrl::get_affinity_mask(thread_class group)
 			}
 			return group == thread_class::ppu || group == thread_class::rsx ? layout.upper : layout.lower;
 		}
-		return process_affinity_mask;
+		return get_process_affinity_mask();
 	}
 	detect_cpu_layout();
 
 	if (const auto thread_count = utils::get_thread_count())
 	{
-		const u64 all_cores_mask = process_affinity_mask;
+		const u64 all_cores_mask = get_process_affinity_mask();
 
 		switch (g_native_core_layout)
 		{
@@ -5069,7 +5123,7 @@ u64 thread_ctrl::get_affinity_mask(thread_class group)
 
 			for (u32 core = 0; core < 64u; core++)
 			{
-				if (~process_affinity_mask & (u64{1} << core))
+				if (~get_process_affinity_mask() & (u64{1} << core))
 				{
 					continue;
 				}
@@ -5384,27 +5438,104 @@ void thread_ctrl::set_native_priority(int priority)
 
 u64 thread_ctrl::get_process_affinity_mask()
 {
-	static const u64 mask = []() -> u64
-	{
+	// Lazy + retry-on-zero. A DECLARE-time read from the Android .so loader
+	// thread previously cached a cpuset-restricted mask for the whole process,
+	// which made cell::topology::detect fail and left fiber hosts unpinned.
+	static std::atomic<u64> cached{0};
+	if (const u64 hit = cached.load(std::memory_order_acquire))
+		return hit;
+
+	u64 mask = 0;
 #ifdef _WIN32
-		DWORD_PTR res, _sys;
-		if (!GetProcessAffinityMask(GetCurrentProcess(), &res, &_sys))
+	DWORD_PTR res = 0, _sys = 0;
+	if (!GetProcessAffinityMask(GetCurrentProcess(), &res, &_sys))
+	{
+		sig_log.error("Failed to get process affinity mask.");
+		return 0;
+	}
+	mask = res;
+#elif defined(__linux__) || defined(__DragonFly__) || defined(__FreeBSD__)
+	// Prefer the process cpuset from /proc (not the calling thread's affinity —
+	// sched_getaffinity(0) follows the current thread, which may already be pinned).
+	{
+		const int fd = ::open("/proc/self/status", O_RDONLY | O_CLOEXEC);
+		if (fd >= 0)
 		{
-			sig_log.error("Failed to get process affinity mask.");
-			return 0;
+			char buf[4096]{};
+			const auto got = ::read(fd, buf, sizeof(buf) - 1);
+			::close(fd);
+			if (got > 0)
+			{
+				if (const char* line = std::strstr(buf, "Cpus_allowed_list:"))
+				{
+					line += sizeof("Cpus_allowed_list:") - 1;
+					while (*line == '\t' || *line == ' ') ++line;
+					// "0-7" / "0-5,7" / "0,1,2,3" — only cores < 64.
+					u64 parsed = 0;
+					while (*line && *line != '\n')
+					{
+						while (*line == ' ' || *line == '\t') ++line;
+						if (!(*line >= '0' && *line <= '9')) break;
+						u32 a = 0;
+						while (*line >= '0' && *line <= '9') a = a * 10 + (*line++ - '0');
+						u32 b = a;
+						if (*line == '-')
+						{
+							++line;
+							b = 0;
+							while (*line >= '0' && *line <= '9') b = b * 10 + (*line++ - '0');
+						}
+						if (a > b) std::swap(a, b);
+						for (u32 c = a; c <= b && c < 64u; ++c) parsed |= u64{1} << c;
+						if (*line == ',') ++line;
+					}
+					if (parsed) mask = parsed;
+				}
+			}
 		}
-
-		return res;
+	}
+	if (!mask)
+	{
+		// Fall back to the thread-group leader, then the calling thread.
+		cpu_set_t cs;
+		CPU_ZERO(&cs);
+		int err = -1;
+#ifdef ANDROID
+		err = ::sched_getaffinity(static_cast<pid_t>(::getpid()), sizeof(cs), &cs) == 0 ? 0 : errno;
+		if (err)
+			err = ::sched_getaffinity(0, sizeof(cs), &cs) == 0 ? 0 : errno;
 #else
-		// Assume it's called from the main thread (this is a bit shaky)
-		return thread_ctrl::get_thread_affinity_mask();
+		err = ::sched_getaffinity(static_cast<pid_t>(::getpid()), sizeof(cs), &cs) == 0 ? 0 : errno;
+		if (err)
+			err = pthread_getaffinity_np(pthread_self(), sizeof(cs), &cs);
 #endif
-	}();
-
-	return mask;
+		if (!err)
+		{
+			for (u32 core = 0; core < 64u; core++)
+			{
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wold-style-cast"
+				if (CPU_ISSET(core, &cs))
+#pragma GCC diagnostic pop
+					mask |= 1ull << core;
+			}
+		}
+		else
+		{
+			sig_log.error("Failed to get process affinity mask: error %d.", err);
+		}
+	}
+#else
+	mask = thread_ctrl::get_thread_affinity_mask();
+#endif
+	if (mask)
+	{
+		u64 expected = 0;
+		cached.compare_exchange_strong(expected, mask, std::memory_order_release, std::memory_order_acquire);
+		return cached.load(std::memory_order_acquire);
+	}
+	return 0;
 }
-
-DECLARE(thread_ctrl::process_affinity_mask) = get_process_affinity_mask();
 
 void thread_ctrl::set_thread_affinity_mask(u64 mask)
 {
@@ -5412,7 +5543,7 @@ void thread_ctrl::set_thread_affinity_mask(u64 mask)
 
 #ifdef _WIN32
 	HANDLE _this_thread = GetCurrentThread();
-	if (!SetThreadAffinityMask(_this_thread, !mask ? process_affinity_mask : mask))
+	if (!SetThreadAffinityMask(_this_thread, !mask ? get_process_affinity_mask() : mask))
 	{
 		sig_log.error("Failed to set thread affinity 0x%x: error: %s", mask, fmt::win_error{GetLastError(), nullptr});
 	}
@@ -5429,7 +5560,7 @@ void thread_ctrl::set_thread_affinity_mask(u64 mask)
 	if (!mask)
 	{
 		// Reset affinity mask
-		mask = process_affinity_mask;
+		mask = get_process_affinity_mask();
 	}
 
 	cpu_set_t cs;
@@ -5472,7 +5603,7 @@ void thread_ctrl::set_thread_affinity_mask(u64 mask)
 u64 thread_ctrl::get_thread_affinity_mask()
 {
 #ifdef _WIN32
-	const u64 res = process_affinity_mask;
+	const u64 res = get_process_affinity_mask();
 
 	if (DWORD_PTR result = SetThreadAffinityMask(GetCurrentThread(), res))
 	{

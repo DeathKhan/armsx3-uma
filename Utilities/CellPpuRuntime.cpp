@@ -44,29 +44,42 @@ void ppu_runtime::pin_hosts_to_upper(std::uint64_t upper_mask)
 	m_upper_mask = upper_mask;
 }
 
+void ppu_runtime::request_host_pins_locked()
+{
+	if (!m_scheduler || !m_upper_mask || m_pinned) return;
+	unsigned host = 0;
+	for (unsigned cpu = 0; cpu < 64 && host < m_scheduler->host_count(); ++cpu)
+	{
+		if (!(m_upper_mask & (std::uint64_t{1} << cpu))) continue;
+		auto* arg = new pin_arg{cpu};
+		auto& task = m_scheduler->spawn(host, &pin_work, arg);
+		m_scheduler->admit(task);
+		++host;
+	}
+	if (host)
+	{
+		m_pinned = true;
+		cell_fiber.notice("ARMSX3_CELL fiber hosts: pin requested count=%u upper=0x%x",
+			host, static_cast<unsigned>(m_upper_mask));
+	}
+}
+
 void ppu_runtime::ensure_started()
 {
 	if (!enabled()) return;
 	std::lock_guard lock(m_mutex);
-	if (m_scheduler) return;
+	if (m_scheduler)
+	{
+		// Topology may succeed after an earlier empty-mask bring-up; pin then.
+		request_host_pins_locked();
+		return;
+	}
 
 	m_scheduler = std::make_unique<scheduler>(2);
 	m_live.store(true, std::memory_order_release);
 	cell_fiber.notice("ARMSX3_CELL fiber hosts: started count=%u dispatch=%d upper=0x%x",
 		m_scheduler->host_count(), fiber_dispatch_enabled() ? 1 : 0, static_cast<unsigned>(m_upper_mask));
-
-	if (m_upper_mask)
-	{
-		unsigned host = 0;
-		for (unsigned cpu = 0; cpu < 64 && host < m_scheduler->host_count(); ++cpu)
-		{
-			if (!(m_upper_mask & (std::uint64_t{1} << cpu))) continue;
-			auto* arg = new pin_arg{cpu};
-			auto& task = m_scheduler->spawn(host, &pin_work, arg);
-			m_scheduler->admit(task);
-			++host;
-		}
-	}
+	request_host_pins_locked();
 }
 
 void ppu_runtime::stop()
@@ -76,6 +89,8 @@ void ppu_runtime::stop()
 	m_scheduler->stop();
 	m_scheduler->join();
 	m_scheduler.reset();
+	m_pinned = false;
+	m_upper_mask = 0;
 	m_live.store(false, std::memory_order_release);
 	cell_fiber.notice("ARMSX3_CELL fiber hosts: stopped");
 }

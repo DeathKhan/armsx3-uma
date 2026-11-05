@@ -50,4 +50,9 @@ inline bool cell_signal(const wait_phase& phase)
 #endif
 	return false;
 }
+
+// When a PPU fiber is about to take a kernel wait, park it on the scheduler
+// instead of blocking the host pthread. Implemented in CellPpuRuntime.cpp.
+bool try_fiber_park();
 }
+

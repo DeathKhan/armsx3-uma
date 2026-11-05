@@ -1170,6 +1170,17 @@ atomic_wait_engine::wait(const void* data, u32 old_value, u64 timeout, atomic_wa
 				break;
 			}
 		}
+		else if (cell::try_fiber_park())
+		{
+			// Guest fiber parked; host returned to the scheduler. On wake the
+			// ptr_cmp loop rechecks. Notifiers still hit thread_base::notify ->
+			// wake_guest as well as the futex/sema path.
+			if (!s_tls_wait_cb(data, ++attempts, stamp0))
+			{
+				break;
+			}
+			continue;
+		}
 		else
 		{
 			futex(&cond->sync, FUTEX_WAIT_PRIVATE, val, timeout + 1 ? &ts : nullptr);

@@ -96,6 +96,21 @@ void scheduler::admit(fiber_task& task)
 	host.cv.notify_one();
 }
 
+void scheduler::requeue(fiber_task& task)
+{
+	if (task.m_scheduler != this)
+		throw std::logic_error("Cell scheduler: foreign task");
+	if (m_stopping.load(std::memory_order_acquire))
+		return;
+	task.m_parked.store(false, std::memory_order_release);
+	auto& host = *m_hosts.at(task.m_host);
+	{
+		std::lock_guard lock(host.mutex);
+		host.ready.push_back(&task);
+	}
+	host.cv.notify_one();
+}
+
 void scheduler::signal_host(unsigned host_index)
 {
 	auto& host = *m_hosts.at(host_index);
@@ -179,7 +194,8 @@ void scheduler::host_main(host_state& host)
 		release(*task, ticket);
 		t_current = nullptr;
 
-		if (alive && !m_stopping.load(std::memory_order_acquire) && !task->m_cancel.load(std::memory_order_acquire))
+		if (alive && !m_stopping.load(std::memory_order_acquire) && !task->m_cancel.load(std::memory_order_acquire)
+			&& !task->m_parked.load(std::memory_order_acquire))
 		{
 			std::lock_guard lock(host.mutex);
 			host.ready.push_back(task);

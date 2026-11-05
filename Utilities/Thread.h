@@ -7,6 +7,10 @@
 #include <thread>
 #include <string>
 
+#include "Cell.h"
+
+namespace cell { class fiber_task; }
+
 // Hardware core layout
 enum class native_core_arrangement : u32
 {
@@ -157,8 +161,15 @@ private:
 	// Thread task queue (reversed linked list)
 	atomic_ptr<thread_future> m_taskq{};
 
+	cell::fiber_task* m_cell_fiber = nullptr;
+	bool m_cell_fiber_backend = false;
+
 	// Start thread
 	void start();
+
+	// Start as a Cell PPU fiber on the two-host scheduler (ARMSX3_CELL_FIBER=1).
+	// entry is named_thread::entry_point — must NOT pthread_exit the host.
+	void start_fiber(u64 (*entry)(thread_base*));
 
 	// Called at the thread start
 	void initialize(void (*error_cb)());
@@ -185,6 +196,10 @@ protected:
 public:
 	// Get CPU cycles since last time this function was called. First call returns 0.
 	u64 get_cycles();
+
+	void bind_cell_fiber(cell::fiber_task* task) noexcept { m_cell_fiber = task; m_cell_fiber_backend = true; }
+	cell::fiber_task* cell_fiber_task() const noexcept { return m_cell_fiber; }
+	bool is_cell_fiber() const noexcept { return m_cell_fiber_backend; }
 
 	// Wait for the thread (it does NOT change thread state, and can be called from multiple threads)
 	bool join(bool dtor = false) const;
@@ -571,6 +586,14 @@ public:
 		: Context(std::forward<Args>(args)...)
 		, thread(trampoline, std::string(Context::thread_name))
 	{
+		if constexpr (requires { Context::cell_fiber_backend; })
+		{
+			if (Context::cell_fiber_backend && ::cell::fiber_dispatch_enabled())
+			{
+				thread::start_fiber(&named_thread::entry_point);
+				return;
+			}
+		}
 		thread::start();
 	}
 
@@ -714,6 +737,14 @@ public:
 		{
 			// Run thread
 			ensure(operator thread_state() == thread_state::finished);
+			if constexpr (requires { Context::cell_fiber_backend; })
+			{
+				if (Context::cell_fiber_backend && ::cell::fiber_dispatch_enabled())
+				{
+					thread::start_fiber(&named_thread::entry_point);
+					return *this;
+				}
+			}
 			thread::start();
 			return *this;
 		}

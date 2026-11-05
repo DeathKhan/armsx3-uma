@@ -34,6 +34,8 @@ public:
 	std::uint64_t owner_ticket() const noexcept { return m_owner_ticket.load(std::memory_order_acquire); }
 	void yield();
 	void request_cancel() noexcept { m_cancel.store(true, std::memory_order_release); }
+	bool parked() const noexcept { return m_parked.load(std::memory_order_acquire); }
+	void set_parked(bool v) noexcept { m_parked.store(v, std::memory_order_release); }
 
 private:
 	friend class scheduler;
@@ -47,6 +49,7 @@ private:
 	std::atomic<std::uint64_t> m_owner_ticket{0};
 	std::atomic<bool> m_admitted{false};
 	std::atomic<bool> m_cancel{false};
+	std::atomic<bool> m_parked{false};
 };
 
 class scheduler final
@@ -61,6 +64,7 @@ public:
 	fiber_task& spawn(unsigned host_index, fiber_task::work_type work, void* argument = nullptr,
 		std::size_t stack_size = 1024 * 1024);
 	void admit(fiber_task& task);
+	void requeue(fiber_task& task); // admit again after a wait-park
 	void signal_host(unsigned host_index);
 	void stop();
 	void join();

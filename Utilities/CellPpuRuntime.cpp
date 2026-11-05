@@ -1,6 +1,10 @@
 #include "Utilities/CellPpuRuntime.h"
+#include "Utilities/CellFiberActivation.h"
+#include "Utilities/Thread.h"
 
 #include "util/logs.hpp"
+
+#include <stdexcept>
 
 #if defined(__linux__)
 #include <sched.h>
@@ -24,7 +28,6 @@ void pin_work(fiber_task& task, void* p)
 	cpu_set_t set;
 	CPU_ZERO(&set);
 	CPU_SET(static_cast<int>(a->cpu), &set);
-	// bionic has sched_setaffinity; pthread_setaffinity_np is glibc-only.
 	sched_setaffinity(0, sizeof(set), &set);
 #endif
 	cell_fiber.notice("ARMSX3_CELL fiber host pinned cpu=%u", a->cpu);
@@ -70,7 +73,6 @@ void ppu_runtime::ensure_started()
 	std::lock_guard lock(m_mutex);
 	if (m_scheduler)
 	{
-		// Topology may succeed after an earlier empty-mask bring-up; pin then.
 		request_host_pins_locked();
 		return;
 	}
@@ -95,10 +97,77 @@ void ppu_runtime::stop()
 	cell_fiber.notice("ARMSX3_CELL fiber hosts: stopped");
 }
 
+void ppu_runtime::guest_work(fiber_task& task, void* p)
+{
+	auto* arg = static_cast<guest_arg*>(p);
+	auto* rt = arg->runtime;
+	auto* thread = arg->thread;
+	auto entry = arg->entry;
+	delete arg;
+
+	rt->m_dispatch.fetch_add(1, std::memory_order_relaxed);
+	cell_fiber.notice("ARMSX3_CELL fiber dispatch: guest start host=%u total=%u",
+		task.host_index(), static_cast<unsigned>(rt->m_dispatch.load(std::memory_order_relaxed)));
+
+	// Run the named_thread entry (initialize + Context::operator() + finalize state).
+	// Must NOT call the pthread trampoline that pthread_exit's the host.
+	(void)entry(thread);
+
+	cell_fiber.notice("ARMSX3_CELL fiber dispatch: guest done host=%u", task.host_index());
+}
+
+fiber_task& ppu_runtime::spawn_guest(thread_base& thread, guest_entry entry)
+{
+	ensure_started();
+	std::lock_guard lock(m_mutex);
+	if (!m_scheduler)
+		throw std::logic_error("Cell PPU runtime: no scheduler");
+
+	const unsigned hosts = m_scheduler->host_count();
+	const unsigned host = hosts ? (m_rr.fetch_add(1, std::memory_order_relaxed) % hosts) : 0;
+	auto* arg = new guest_arg{&thread, entry, this};
+	auto& task = m_scheduler->spawn(host, &guest_work, arg);
+	thread.bind_cell_fiber(&task);
+	m_scheduler->admit(task);
+	return task;
+}
+
+void ppu_runtime::park_current_for_wait()
+{
+	auto* task = scheduler::current_task();
+	if (!task) return;
+	const auto snap = fiber_tls::capture();
+	fiber_tls::deactivate_current();
+	task->set_parked(true);
+	task->yield();
+	fiber_tls::restore(snap);
+}
+
+void ppu_runtime::wake_guest(thread_base& thread)
+{
+	if (auto* task = thread.cell_fiber_task())
+	{
+		if (task->parked())
+		{
+			std::lock_guard lock(m_mutex);
+			if (m_scheduler)
+				m_scheduler->requeue(*task);
+		}
+	}
+}
+
 void ppu_runtime_on_cell_policy(std::uint64_t upper_mask)
 {
 	auto& rt = ppu_runtime::get();
 	rt.pin_hosts_to_upper(upper_mask);
 	rt.ensure_started();
+}
+
+bool try_fiber_park()
+{
+	if (!fiber_dispatch_enabled()) return false;
+	if (!scheduler::current_task()) return false;
+	ppu_runtime::get().park_current_for_wait();
+	return true;
 }
 }

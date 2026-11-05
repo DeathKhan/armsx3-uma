@@ -362,6 +362,9 @@ public:
 
 	std::vector<hle_func_call_with_toc_info_t> hle_func_calls_with_toc_info;
 
+	// Opt into Cell PPU fiber backend when ARMSX3_CELL_FIBER=1.
+	static constexpr bool cell_fiber_backend = true;
+
 	// For named_thread ctor
 	const struct thread_name_t
 	{

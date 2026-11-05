@@ -35,6 +35,18 @@ inline bool enabled()
 	return value;
 }
 
+// PPU named_thread fiber backend. Requires enabled(). Read lazily after driver_env.
+inline bool fiber_dispatch_enabled()
+{
+	if (!enabled()) return false;
+	static const bool value = []
+	{
+		const char* env = std::getenv("ARMSX3_CELL_FIBER");
+		return env && std::string_view(env) == "1";
+	}();
+	return value;
+}
+
 // Only guest CPU hosts use Cell waits. RSX, timers, usleep and helper waits keep
 // their established sleeping behavior; turning all atomic waits into spins was
 // previously measured to lose both cycles and power.

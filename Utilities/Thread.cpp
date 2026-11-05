@@ -11,6 +11,7 @@
 #include "Thread.h"
 #include "Cell.h"
 #include "CellPpuRuntime.h"
+#include "CellScheduler.h"
 #include <atomic>
 #include <mutex>
 #include <algorithm>
@@ -3985,6 +3986,22 @@ void thread_base::start()
 #endif
 }
 
+
+void thread_base::start_fiber(u64 (*entry)(thread_base*))
+{
+	m_sync.atomic_op([&](u32& v)
+	{
+		v &= ~static_cast<u32>(thread_state::mask);
+		v |= static_cast<u32>(thread_state::created);
+	});
+
+	// Sentinel: not a real pthread. Destructor/join must skip pthread_join.
+	m_thread.release(1);
+	m_cell_fiber_backend = true;
+
+	cell::ppu_runtime::get().spawn_guest(*this, entry);
+}
+
 void thread_base::initialize(void (*error_cb)())
 {
 #ifdef __ANDROID__
@@ -4346,6 +4363,14 @@ void thread_ctrl::wait_for(u64 usec, [[maybe_unused]] bool alert /* true */)
 		}
 	}
 
+	// PPU fiber: park the guest and return the host to the scheduler instead of
+	// blocking the prime-core pthread. wake_guest requeues on notify.
+	if (_this->is_cell_fiber() && cell::scheduler::current_task())
+	{
+		cell::ppu_runtime::get().park_current_for_wait();
+		return;
+	}
+
 	// Wait for signal and thread state abort
 	atomic_wait::list<2> list{};
 
@@ -4478,7 +4503,13 @@ thread_base::~thread_base() noexcept
 	// Cleanup abandoned tasks: initialize default results and signal
 	this->exec();
 
-	// Cleanup
+	// Cleanup native host only. Fiber-backed PPUs use sentinel m_thread=1 and
+	// complete via m_sync; joining a scheduler host pthread would be fatal.
+	if (m_cell_fiber_backend)
+	{
+		return;
+	}
+
 	{
 #ifdef _WIN32
 		const HANDLE handle0 = reinterpret_cast<HANDLE>(m_thread.load());
@@ -4529,6 +4560,10 @@ void thread_base::notify()
 	if (~m_sync.fetch_or(4) & 4)
 	{
 		m_sync.notify_all();
+	}
+	if (m_cell_fiber_backend)
+	{
+		cell::ppu_runtime::get().wake_guest(*this);
 	}
 }
 

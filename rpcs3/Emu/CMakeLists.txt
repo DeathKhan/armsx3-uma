@@ -94,6 +94,7 @@ target_sources(rpcs3_emu PRIVATE
     ../../Utilities/CellFiber.cpp
     ../../Utilities/CellScheduler.cpp
     ../../Utilities/CellPpuRuntime.cpp
+    ../../Utilities/CellFiberActivation.cpp
     ../../Utilities/version.cpp
 )
 if(APPLE)
@@ -111,6 +112,7 @@ set_source_files_properties("../../Utilities/JITLLVM.cpp" "../../Utilities/JITAS
 
 set_source_files_properties(
     "../../Utilities/CellFiber.cpp"
+    "../../Utilities/CellFiberActivation.cpp"
     "../../Utilities/CellScheduler.cpp"
     "../../Utilities/CellPpuRuntime.cpp"
     PROPERTIES

@@ -1,33 +1,31 @@
 # PPU fiber runtime status
 
-## What is wired (commit `a14e6e458`+)
+## What is wired (commit tip)
 
 - `Utilities/CellFiber.{h,cpp}` and `CellScheduler.{h,cpp}` are linked into `rpcs3_emu`.
-- Host fixtures still pass: `tools/cell/tests/run_fiber.sh`, `run_scheduler.sh`.
-- `CellPpuRuntime` starts **two** scheduler hosts when `ARMSX3_CELL=1` (from
-  `thread_ctrl::apply_cell_policy`). Hosts pin to the upper topology mask when
-  detect succeeds.
-- `ARMSX3_CELL_FIBER=1` is reserved for named_thread\<ppu_thread\> dispatch. It is
-  **off** by default; without it PPU guests remain native threads (topology+wait
-  path that measured 152 Mc/f on LBP).
+- Host fixtures: `tools/cell/tests/run_fiber.sh`, `run_scheduler.sh`, `run_ppu_dispatch.sh`.
+- `CellPpuRuntime` starts **two** scheduler hosts when `ARMSX3_CELL=1`, pinned to the
+  upper topology mask when detect succeeds (lazy `Cpus_allowed_list` + capacity fallback).
+- `ARMSX3_CELL_FIBER=1` enables the PPU `named_thread` fiber backend:
+  - `ppu_thread::cell_fiber_backend` opts in
+  - `thread_base::start_fiber` admits a guest fiber (no `pthread_exit` on the host)
+  - `thread_ctrl::wait_for` parks the fiber and `notify` requeues it
+  - `CellFiberActivation` captures/restores TLS around park
+- Without `ARMSX3_CELL_FIBER`, PPU guests remain native threads (topology+wait path).
 
-## Go/no-go for enabling fiber dispatch
+## Go/no-go remaining (audit)
 
-Do **not** set `ARMSX3_CELL_FIBER=1` or convert `named_thread<ppu_thread>` until:
+Still incomplete relative to `CELL_FIBER_AUDIT.md`:
 
-1. Phase1 correctness on device: LBP 10 boot loops, savestate round-trip, clean
-   exit (Ratchet skipped: release control also SIGSEGV in SPU LLVM verify).
-2. Audit matrix in `CELL_FIBER_AUDIT.md` for waits, TLS activate/deactivate,
-   join/exit, and savestate quiescence has code behind the flag.
-3. LBP boot+play with fiber dispatch still meets the wait/topology gate (no WFE
-   spin regression; playable Sackboy).
+1. Full TLS activate/deactivate for suspend-all slot/stamp and every wait path
+   (`state.wait`, lv2/HLE direct waits, `atomic_wait_engine` registration).
+2. Guest timeout deadline service while all fibers are parked.
+3. Blocking I/O / host lock policy; stop/join/savestate quiescence for suspended C++ stacks.
+4. Device gate: LBP boot+play with `ARMSX3_CELL_FIBER=1` must stay playable before LS/codegen.
 
-## Remaining work (audit scoped plan)
+Until those land, treat fiber dispatch as experimental behind the env flag.
 
-1. PPU-only `thread_base` backend; guest completion must not `pthread_exit` a host.
-2. Explicit CPU/Thread/vm activate/deactivate; assert no lv2 mutex across switch.
-3. Hook every PPU `state.wait` / lv2 / HLE wait into scheduler-owned records.
-4. Guest timeout deadline service while all fibers are parked.
-5. Blocking I/O / host lock policy; stop/join/savestate quiescence.
+## Device smoke expectations
 
-Until that gate passes, local-store and codegen/layout stay disabled as a completed rebuild.
+- Topology: `SPU/helpers=0x3f PPU/RSX=0xc0` and `fiber host pinned cpu=6` / `cpu=7`.
+- With `ARMSX3_CELL_FIBER=1`: log `fiber dispatch: guest start` and `dispatch_count` growth.

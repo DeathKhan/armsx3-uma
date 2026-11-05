@@ -8,6 +8,7 @@ case "${1:-}" in
   --android)
     compiler=${CXX:-$HOME/Android/sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang++}
     output="$out/test-wait-engine-android-arm64"
+    args+=(-static-libstdc++)
     ;;
   "")
     compiler=${CXX:-clang++}
@@ -17,7 +18,8 @@ case "${1:-}" in
   *) printf 'Usage: %s [--android]\n' "$0" >&2; exit 2 ;;
 esac
 "$compiler" "${args[@]}" -include "$repo/tools/cell/tests/atomic_host_shim.h" \
-  "$repo/tools/cell/tests/test_wait_engine.cpp" -o "$output"
+  "$repo/tools/cell/tests/test_wait_engine.cpp" \
+  "$repo/Utilities/CellScheduler.cpp" "$repo/Utilities/CellFiber.cpp" -o "$output"
 if [[ ${1:-} == --android ]]; then
   printf 'Built %s (not executed)\n' "$output"
 else

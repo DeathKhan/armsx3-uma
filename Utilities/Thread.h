@@ -6,6 +6,7 @@
 
 #include <thread>
 #include <string>
+#include <any>
 
 #include "Cell.h"
 
@@ -169,7 +170,7 @@ private:
 
 	// Start as a Cell PPU fiber on the two-host scheduler (ARMSX3_CELL_FIBER=1).
 	// entry is named_thread::entry_point — must NOT pthread_exit the host.
-	void start_fiber(u64 (*entry)(thread_base*));
+	void start_fiber(u64 (*entry)(thread_base*), std::string (*describe)(thread_base*) = nullptr);
 
 	// Called at the thread start
 	void initialize(void (*error_cb)());
@@ -196,6 +197,9 @@ protected:
 public:
 	// Get CPU cycles since last time this function was called. First call returns 0.
 	u64 get_cycles();
+
+	// Registers thread_ctrl's thread_locals with cell::fiber_tls (static init).
+	static bool register_cell_fiber_tls();
 
 	void bind_cell_fiber(cell::fiber_task* task) noexcept { m_cell_fiber = task; m_cell_fiber_backend = true; }
 	cell::fiber_task* cell_fiber_task() const noexcept { return m_cell_fiber; }
@@ -518,6 +522,20 @@ class named_thread final : public Context, result_storage<Context>, thread_base
 		return static_cast<named_thread*>(_base)->entry_point2();
 	}
 
+	// ARMSX3_CELL_FIBER stall dumps: thread name plus the context's dump_misc (diagnostic only).
+	static std::string cell_fiber_describe(thread_base* _base)
+	{
+		auto* _this = static_cast<named_thread*>(_base);
+		std::string out = thread_ctrl::get_name(*_this);
+		if constexpr (requires (const Context& c, std::string& s, std::any& a) { c.dump_misc(s, a); })
+		{
+			std::any custom;
+			out += "\n";
+			static_cast<const Context&>(*_this).dump_misc(out, custom);
+		}
+		return out;
+	}
+
 	u64 entry_point2()
 	{
 		while (u32 value = stx::g_launch_retainer)
@@ -590,7 +608,7 @@ public:
 		{
 			if (Context::cell_fiber_backend && ::cell::fiber_dispatch_enabled())
 			{
-				thread::start_fiber(&named_thread::entry_point);
+				thread::start_fiber(&named_thread::entry_point, &named_thread::cell_fiber_describe);
 				return;
 			}
 		}
@@ -741,7 +759,7 @@ public:
 			{
 				if (Context::cell_fiber_backend && ::cell::fiber_dispatch_enabled())
 				{
-					thread::start_fiber(&named_thread::entry_point);
+					thread::start_fiber(&named_thread::entry_point, &named_thread::cell_fiber_describe);
 					return *this;
 				}
 			}

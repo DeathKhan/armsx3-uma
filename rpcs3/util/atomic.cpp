@@ -1,6 +1,7 @@
 #include "atomic.hpp"
 #include "Utilities/Cell.h"
 #include "Utilities/CellWait.h"
+#include "Utilities/CellFiberTls.h"
 #include "sysinfo.hpp"
 
 #if defined(ARCH_ARM64) && (defined(__linux__) || defined(_WIN32)) && !defined(ARM_FEATURE_LSE2)
@@ -87,6 +88,8 @@ static thread_local bool(*s_tls_wait_cb)(const void* data, u64 attempts, u64 sta
 
 // Callback for wait() function for a second custon condition, commonly passed with timeout
 static thread_local bool(*s_tls_one_time_wait_cb)(u64 attempts) = nullptr;
+CELL_FIBER_TLS(s_tls_wait_cb);
+CELL_FIBER_TLS(s_tls_one_time_wait_cb);
 
 // Compare data in memory with old value, and return true if they are equal
 static NEVER_INLINE bool ptr_cmp(const void* data, u32 old, atomic_wait::info* ext = nullptr)
@@ -190,6 +193,10 @@ namespace
 		atomic_t<u32> sync;
 		cell::wait_phase cell_wait;
 
+		// Guest PPU fiber waiting on this cond (ARMSX3_CELL_FIBER), else null.
+		// Published before sync becomes 1; notifiers read it after wakeup().
+		void* fiber;
+
 #ifdef USE_STD
 		// Standard CV/mutex pair (often contains pthread_cond_t/pthread_mutex_t)
 		un_t<std::condition_variable> cv;
@@ -229,6 +236,7 @@ namespace
 			link = 0;
 			sync.release(0);
 			cell_wait.enter_native();
+			fiber = nullptr;
 			oldv = 0;
 
 #ifdef USE_STD
@@ -300,6 +308,11 @@ namespace
 
 		void alert_native()
 		{
+			if (fiber)
+			{
+				cell::wake_fiber(fiber);
+				return;
+			}
 #ifdef USE_FUTEX
 			if (cell::cell_signal(cell_wait)) return;
 			// Use "wake all" arg for robustness, only 1 thread is expected
@@ -1040,6 +1053,12 @@ atomic_wait_engine::wait(const void* data, u32 old_value, u64 timeout, atomic_wa
 #if defined(ARCH_ARM64) && defined(__linux__)
 	cell_events = cell::event_wait_enabled(timeout, utils::has_wfe_event_stream());
 #endif
+	// A parked fiber frees its host for other guests; never WFE-spin it.
+	cond->fiber = cell::current_fiber();
+	if (cond->fiber)
+	{
+		cell_events = false;
+	}
 	const u64 cell_start = cell_events ? utils::get_tsc() : 0;
 	u32 cell_immediate_wakes = 0;
 	u32 cell_noop_streak = 0;
@@ -1170,16 +1189,12 @@ atomic_wait_engine::wait(const void* data, u32 old_value, u64 timeout, atomic_wa
 				break;
 			}
 		}
-		else if (cell::try_fiber_park())
+		else if (cond->fiber)
 		{
-			// Guest fiber parked; host returned to the scheduler. On wake the
-			// ptr_cmp loop rechecks. Notifiers still hit thread_base::notify ->
-			// wake_guest as well as the futex/sema path.
-			if (!s_tls_wait_cb(data, ++attempts, stamp0))
-			{
-				break;
-			}
-			continue;
+			// Guest fiber: park on the scheduler instead of FUTEX_WAIT so the
+			// host runs other guests. alert_native wakes it; a wake between the
+			// sync check above and the park is sticky, not lost.
+			cell::park_fiber(timeout + 1 ? cell::fiber_now_ns() + native_timeout : 0);
 		}
 		else
 		{

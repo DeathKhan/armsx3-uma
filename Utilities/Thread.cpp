@@ -12,6 +12,7 @@
 #include "Cell.h"
 #include "CellPpuRuntime.h"
 #include "CellScheduler.h"
+#include "CellFiberTls.h"
 #include <atomic>
 #include <mutex>
 #include <algorithm>
@@ -3987,7 +3988,18 @@ void thread_base::start()
 }
 
 
-void thread_base::start_fiber(u64 (*entry)(thread_base*))
+bool thread_base::register_cell_fiber_tls()
+{
+	// Per-guest thread_locals that must follow a PPU fiber across hosts' switches.
+	CELL_FIBER_TLS_EXPR(thread_ctrl::g_tls_this_thread);
+	CELL_FIBER_TLS_EXPR(thread_ctrl::g_tls_error_callback);
+	CELL_FIBER_TLS_EXPR(g_tls_log_prefix);
+	return true;
+}
+
+[[maybe_unused]] static const bool s_cell_fiber_tls_thread = thread_base::register_cell_fiber_tls();
+
+void thread_base::start_fiber(u64 (*entry)(thread_base*), std::string (*describe)(thread_base*))
 {
 	m_sync.atomic_op([&](u32& v)
 	{
@@ -3999,7 +4011,7 @@ void thread_base::start_fiber(u64 (*entry)(thread_base*))
 	m_thread.release(1);
 	m_cell_fiber_backend = true;
 
-	cell::ppu_runtime::get().spawn_guest(*this, entry);
+	cell::ppu_runtime::get().spawn_guest(*this, entry, describe);
 }
 
 void thread_base::initialize(void (*error_cb)())
@@ -4339,7 +4351,9 @@ void thread_ctrl::wait_for(u64 usec, [[maybe_unused]] bool alert /* true */)
 		}
 	} fd_timer;
 
-	if (!alert && fd_timer != -1)
+	// A guest fiber must not block its host in read(); it takes the timed
+	// atomic wait below, which parks it on the scheduler.
+	if (!alert && fd_timer != -1 && !(_this && _this->is_cell_fiber()))
 	{
 		struct itimerspec timeout;
 		u64 missed;
@@ -4361,14 +4375,6 @@ void thread_ctrl::wait_for(u64 usec, [[maybe_unused]] bool alert /* true */)
 		{
 			return;
 		}
-	}
-
-	// PPU fiber: park the guest and return the host to the scheduler instead of
-	// blocking the prime-core pthread. wake_guest requeues on notify.
-	if (_this->is_cell_fiber() && cell::scheduler::current_task())
-	{
-		cell::ppu_runtime::get().park_current_for_wait();
-		return;
 	}
 
 	// Wait for signal and thread state abort
@@ -4560,10 +4566,6 @@ void thread_base::notify()
 	if (~m_sync.fetch_or(4) & 4)
 	{
 		m_sync.notify_all();
-	}
-	if (m_cell_fiber_backend)
-	{
-		cell::ppu_runtime::get().wake_guest(*this);
 	}
 }
 
@@ -5069,6 +5071,8 @@ namespace
 void thread_ctrl::apply_cell_policy(thread_class group)
 {
 	if (!cell::enabled()) return;
+	// Guest fibers inherit their host's pin (one prime core each).
+	if (cell::scheduler::current_task()) return;
 	cell::waiter_enabled() = group == thread_class::ppu || group == thread_class::spu;
 	const auto& layout = get_cell_topology(get_process_affinity_mask());
 	if (layout)

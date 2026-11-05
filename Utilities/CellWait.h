@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 
 namespace cell
 {
@@ -51,8 +52,14 @@ inline bool cell_signal(const wait_phase& phase)
 	return false;
 }
 
-// When a PPU fiber is about to take a kernel wait, park it on the scheduler
-// instead of blocking the host pthread. Implemented in CellPpuRuntime.cpp.
-bool try_fiber_park();
+// PPU fiber waits (ARMSX3_CELL_FIBER). Implemented in CellPpuRuntime.cpp.
+// current_fiber: the guest fiber running on this host thread, or null on any
+// native thread. park_fiber parks it until wake_fiber or deadline_ns (steady
+// clock, 0 = none); wakes are sticky, so a wake between the caller's predicate
+// check and the park is never lost.
+void* current_fiber() noexcept;
+void park_fiber(std::uint64_t deadline_ns);
+void wake_fiber(void* fiber);
+std::uint64_t fiber_now_ns() noexcept;
 }
 

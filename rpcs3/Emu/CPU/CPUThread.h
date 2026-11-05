@@ -300,6 +300,9 @@ public:
 		return nullptr;
 	}
 
+	// Registers g_tls_this_thread with cell::fiber_tls (static init).
+	static bool register_cell_fiber_tls();
+
 private:
 	static thread_local cpu_thread* g_tls_this_thread;
 };

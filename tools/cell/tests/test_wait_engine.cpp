@@ -47,6 +47,10 @@ bool has_wfe_event_stream() { return (::getauxval(AT_HWCAP) & HWCAP_EVTSTRM) != 
 }
 
 #include "rpcs3/util/atomic.cpp"
+#include "Utilities/CellScheduler.h"
+#include "Utilities/CellFiberTls.h"
+#include "Utilities/sema.cpp"
+#include "Utilities/mutex.cpp"
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -237,6 +241,226 @@ static void timeouts_callbacks()
     assert(callback_calls == 1);
 }
 
+// Guest PPU fibers waiting in the production engine (ARMSX3_CELL_FIBER): the
+// fiber hooks route parks through a real two-host scheduler.
+static cell::scheduler* g_fiber_sched = nullptr;
+namespace cell
+{
+void* current_fiber() noexcept { return scheduler::current_task(); }
+void park_fiber(std::uint64_t deadline_ns)
+{
+    if (auto* task = scheduler::current_task()) task->park(deadline_ns);
+}
+void wake_fiber(void* fiber) { g_fiber_sched->wake(*static_cast<fiber_task*>(fiber)); }
+std::uint64_t fiber_now_ns() noexcept { return scheduler::now_ns(); }
+}
+
+namespace
+{
+constexpr unsigned fiber_count = 6;
+constexpr unsigned fiber_rounds = 5000;
+atomic_t<u32> g_fiber_words[fiber_count]{};
+atomic_t<u32> g_fiber_chain{0};
+std::atomic<unsigned> g_fiber_done{0};
+std::atomic<u64> g_fiber_timed_ns{0};
+
+void fiber_waiter(cell::fiber_task&, void* p)
+{
+    auto& word = g_fiber_words[reinterpret_cast<uptr>(p)];
+    for (unsigned r = 0; r < fiber_rounds; ++r)
+    {
+        // Even: fiber's turn. Odd: a native thread flips it back and notifies.
+        while (true)
+        {
+            const u32 v = word.load();
+            if (!(v & 1)) break;
+            word.wait(v);
+        }
+        word += 1;
+        word.notify_one();
+    }
+    g_fiber_done++;
+}
+
+// Two fibers on the same host hand a token back and forth through the engine.
+void fiber_chain(cell::fiber_task&, void* p)
+{
+    const u32 parity = static_cast<u32>(reinterpret_cast<uptr>(p));
+    for (unsigned r = 0; r < fiber_rounds; ++r)
+    {
+        while (true)
+        {
+            const u32 v = g_fiber_chain.load();
+            if ((v & 1) == parity) break;
+            g_fiber_chain.wait(v);
+        }
+        g_fiber_chain += 1;
+        g_fiber_chain.notify_all();
+    }
+    g_fiber_done++;
+}
+
+void fiber_timed(cell::fiber_task&, void*)
+{
+    atomic_t<u32> never{0};
+    const auto start = clock_type::now();
+    never.wait(0, atomic_wait_timeout{20'000'000});
+    g_fiber_timed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(clock_type::now() - start).count();
+    g_fiber_done++;
+}
+}
+
+// sys_semaphore shapes on guest fibers (CELL_FIBER_AUDIT wait matrix):
+//  - semaphore_base (Utilities/sema.h) ping-pong between two fibers on ONE host
+//    and between hosts: wait parks the fiber, post must requeue it
+//  - an lv2-style sleep queue: a waiter enqueues its state word under a
+//    shared_mutex and waits on it; the poster dequeues, signals, records the
+//    word in a deferred notify list (thread_local like lv2_obj::g_to_notify,
+//    registered with fiber_tls), yields, and only then flushes notify_one
+namespace
+{
+constexpr unsigned sema_rounds = 4000;
+semaphore<> g_sema_a{0}, g_sema_b{0}, g_sema_c{0}, g_sema_d{0};
+std::atomic<unsigned> g_sema_done{0};
+
+struct lv2_like_sema
+{
+    shared_mutex mutex;
+    std::vector<atomic_t<u32>*> sleepers;
+    u32 value = 0;
+};
+lv2_like_sema g_lv2_sema;
+lv2_like_sema g_lv2_ack;
+static thread_local atomic_t<u32>* t_deferred_notify[4]{};
+CELL_FIBER_TLS(t_deferred_notify);
+
+void lv2_wait(lv2_like_sema& s)
+{
+    atomic_t<u32> state{0};
+    {
+        std::lock_guard lock(s.mutex);
+        if (s.value) { s.value--; return; }
+        state = 1;
+        s.sleepers.push_back(&state);
+    }
+    while (state.load() == 1)
+        state.wait(1);
+}
+
+void lv2_post(lv2_like_sema& s, cell::fiber_task* self)
+{
+    {
+        std::lock_guard lock(s.mutex);
+        if (s.sleepers.empty()) { s.value++; return; }
+        auto* w = s.sleepers.front();
+        s.sleepers.erase(s.sleepers.begin());
+        w->release(0);
+        for (auto& slot : t_deferred_notify)
+            if (!slot) { slot = w; break; }
+    }
+    // A switch between signalling and the deferred flush must not lose the
+    // poster's pending list (it is a thread_local of the host).
+    if (self) self->yield();
+    for (auto& slot : t_deferred_notify)
+        if (auto* w = std::exchange(slot, nullptr)) w->notify_one();
+}
+
+void sema_ping(cell::fiber_task&, void* p)
+{
+    const bool cross = reinterpret_cast<uptr>(p) != 0;
+    auto& in = cross ? g_sema_c : g_sema_a;
+    auto& out = cross ? g_sema_d : g_sema_b;
+    for (unsigned r = 0; r < sema_rounds; ++r) { out.unlock(); in.lock(); }
+    g_sema_done++;
+}
+
+void sema_pong(cell::fiber_task&, void* p)
+{
+    const bool cross = reinterpret_cast<uptr>(p) != 0;
+    auto& in = cross ? g_sema_d : g_sema_b;
+    auto& out = cross ? g_sema_c : g_sema_a;
+    for (unsigned r = 0; r < sema_rounds; ++r) { in.lock(); out.unlock(); }
+    g_sema_done++;
+}
+
+void lv2_waiter(cell::fiber_task& task, void*)
+{
+    for (unsigned r = 0; r < sema_rounds; ++r) { lv2_wait(g_lv2_sema); lv2_post(g_lv2_ack, &task); }
+    g_sema_done++;
+}
+
+void lv2_poster(cell::fiber_task& task, void*)
+{
+    for (unsigned r = 0; r < sema_rounds; ++r) { lv2_post(g_lv2_sema, &task); lv2_wait(g_lv2_ack); }
+    g_sema_done++;
+}
+}
+
+static void fiber_semaphores()
+{
+    cell::scheduler sched(2);
+    g_fiber_sched = &sched;
+    // same host
+    sched.admit(sched.spawn(0, &sema_ping, nullptr));
+    sched.admit(sched.spawn(0, &sema_pong, nullptr));
+    // cross host
+    sched.admit(sched.spawn(0, &sema_ping, reinterpret_cast<void*>(uptr{1})));
+    sched.admit(sched.spawn(1, &sema_pong, reinterpret_cast<void*>(uptr{1})));
+    // lv2-style queue, same host
+    sched.admit(sched.spawn(1, &lv2_waiter, nullptr));
+    sched.admit(sched.spawn(1, &lv2_poster, nullptr));
+    const auto deadline = clock_type::now() + std::chrono::seconds(20);
+    while (g_sema_done.load() < 6)
+    {
+        if (clock_type::now() > deadline)
+        {
+            std::fprintf(stderr, "fiber semaphores: STALL done=%u/6 parks=%llu wakes=%llu\n", g_sema_done.load(),
+                static_cast<unsigned long long>(sched.park_count()), static_cast<unsigned long long>(sched.wake_count()));
+            std::abort();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    std::printf("fiber semaphores: same-host + cross-host semaphore_base and lv2-style deferred-notify queue x %u rounds; parks=%llu wakes=%llu\n",
+        sema_rounds, static_cast<unsigned long long>(sched.park_count()), static_cast<unsigned long long>(sched.wake_count()));
+    sched.stop();
+    sched.join();
+    g_fiber_sched = nullptr;
+}
+
+static void fiber_waits()
+{
+    cell::scheduler sched(2);
+    g_fiber_sched = &sched;
+    for (unsigned i = 0; i < fiber_count; ++i)
+        sched.admit(sched.spawn(i % 2, &fiber_waiter, reinterpret_cast<void*>(uptr{i})));
+    sched.admit(sched.spawn(0, &fiber_chain, reinterpret_cast<void*>(uptr{0})));
+    sched.admit(sched.spawn(0, &fiber_chain, reinterpret_cast<void*>(uptr{1})));
+    sched.admit(sched.spawn(1, &fiber_timed, nullptr));
+    constexpr unsigned total = fiber_count + 3;
+    std::thread driver([]
+    {
+        while (g_fiber_done.load() < total)
+        {
+            for (auto& word : g_fiber_words)
+            {
+                u32 v = word.load();
+                if ((v & 1) && word.compare_and_swap_test(v, v + 1))
+                    word.notify_one();
+            }
+        }
+    });
+    driver.join();
+    assert(g_fiber_timed_ns.load() >= 20'000'000);
+    assert(g_fiber_timed_ns.load() < 1'000'000'000);
+    assert(sched.park_count() > 0 && sched.timeout_count() >= 1);
+    std::printf("fiber waits: %u fibers x %u rounds + same-host chain + timed %.1f ms; parks=%llu wakes=%llu\n",
+        fiber_count, fiber_rounds, g_fiber_timed_ns.load() / 1e6,
+        static_cast<unsigned long long>(sched.park_count()), static_cast<unsigned long long>(sched.wake_count()));
+    sched.stop();
+    sched.join();
+    g_fiber_sched = nullptr;
+}
+
 int main()
 {
     ::alarm(30); // A lost wake must fail the fixture, not hang an agent indefinitely.
@@ -248,6 +472,8 @@ int main()
     unchanged_normal_notify();
     wake_all();
     timeouts_callbacks();
+    fiber_waits();
+    fiber_semaphores();
     for (const auto& root : s_hashtable) assert(root.bits.load().ref == 0);
     ::alarm(0);
 #if defined(ARCH_ARM64)

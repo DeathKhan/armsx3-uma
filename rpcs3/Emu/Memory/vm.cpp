@@ -1,3 +1,4 @@
+#include "Utilities/CellFiberTls.h"
 #include "stdafx.h"
 #include "vm_locking.h"
 #include "vm_ptr.h"
@@ -83,6 +84,7 @@ namespace vm
 
 	// Memory mutex acknowledgement
 	thread_local atomic_t<cpu_thread*>* g_tls_locked = nullptr;
+	CELL_FIBER_TLS(g_tls_locked);
 
 	// Memory mutex: passive locks
 	std::array<atomic_t<cpu_thread*>, g_cfg.core.ppu_threads.max> g_locks{};

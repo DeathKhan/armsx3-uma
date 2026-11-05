@@ -1,94 +1,128 @@
 #include "Utilities/Cell.h"
 #include "Utilities/CellFiber.h"
+#include "Utilities/CellFiberTls.h"
 #include "Utilities/CellScheduler.h"
 
 #include <atomic>
-#include <cassert>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <thread>
 #include <vector>
 
-// Host-only fixture: two hosts run N cooperative "PPU-like" fibers that yield
-// and park/unpark, proving dispatch>0 without the emulator runtime.
-static std::atomic<unsigned> g_ran{0};
-static std::atomic<unsigned> g_parks{0};
+// Host-only fixture for the PPU fiber wait protocol:
+//  - ping-pong: fibers check-then-park on a guest word that a foreign thread
+//    flips and wakes (the lost-wake race the emulator hit at first dispatch)
+//  - timed park returns at its deadline with no waker
+//  - registered thread_locals follow the fiber across parks on a shared host
+#define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "CHECK failed %s:%d: %s\n", __FILE__, __LINE__, #x); std::exit(1); } } while (0)
 
-struct work_arg
+static thread_local unsigned t_guest_id = 0;
+CELL_FIBER_TLS(t_guest_id);
+
+namespace
 {
+constexpr unsigned n_fibers = 8;
+constexpr unsigned n_rounds = 20000;
+
+struct pingpong
+{
+	std::atomic<unsigned> turn{0}; // even: fiber's move, odd: driver's move
+	cell::fiber_task* task = nullptr;
 	unsigned id = 0;
-	unsigned yields = 0;
-	cell::scheduler* sched = nullptr;
 };
 
-static void ppu_like_work(cell::fiber_task& task, void* p)
+std::atomic<unsigned> g_done{0};
+std::atomic<unsigned> g_tls_bad{0};
+
+void pingpong_work(cell::fiber_task& task, void* p)
 {
-	auto* a = static_cast<work_arg*>(p);
-	g_ran.fetch_add(1, std::memory_order_relaxed);
-	for (unsigned i = 0; i < a->yields; ++i)
+	auto* pp = static_cast<pingpong*>(p);
+	t_guest_id = pp->id;
+	for (unsigned r = 0; r < n_rounds; ++r)
 	{
-		task.yield();
+		// Wait for an even turn: check, then park (the racy pattern).
+		while (pp->turn.load() & 1)
+			task.park();
+		if (t_guest_id != pp->id)
+			g_tls_bad.fetch_add(1);
+		pp->turn.fetch_add(1); // hand to the driver
+		if (r % 64 == 0)
+			task.yield();
 	}
-	// Park once, then expect requeue from the driver thread.
-	task.set_parked(true);
-	g_parks.fetch_add(1, std::memory_order_relaxed);
-	task.yield();
-	assert(!task.parked());
-	g_ran.fetch_add(1, std::memory_order_relaxed);
-	(void)a;
+	g_done.fetch_add(1);
+}
+
+std::atomic<std::uint64_t> g_timed_elapsed{0};
+
+void timed_work(cell::fiber_task& task, void*)
+{
+	const auto t0 = cell::scheduler::now_ns();
+	task.park(t0 + 20'000'000);
+	g_timed_elapsed.store(cell::scheduler::now_ns() - t0);
+	g_done.fetch_add(1);
+}
 }
 
 int main()
 {
-	cell::initialize();
-	setenv("ARMSX3_CELL", "1", 1);
-	setenv("ARMSX3_CELL_FIBER", "1", 1);
-
 	cell::scheduler sched(2);
-	constexpr unsigned n = 8;
-	std::vector<work_arg> args(n);
-	std::vector<cell::fiber_task*> tasks;
-	tasks.reserve(n);
-	for (unsigned i = 0; i < n; ++i)
+	std::vector<pingpong> pps(n_fibers);
+	for (unsigned i = 0; i < n_fibers; ++i)
 	{
-		args[i] = work_arg{i, 4, &sched};
-		auto& t = sched.spawn(i % 2, &ppu_like_work, &args[i]);
-		tasks.push_back(&t);
+		pps[i].id = i + 1;
+		pps[i].turn.store(0);
+		auto& t = sched.spawn(i % 2, &pingpong_work, &pps[i]);
+		pps[i].task = &t;
 		sched.admit(t);
 	}
+	auto& timed = sched.spawn(0, &timed_work, nullptr);
+	sched.admit(timed);
 
-	// Wait until all have parked once.
-	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-	while (g_parks.load() < n)
+	// Driver: whenever a fiber hands over (odd turn), flip back and wake it.
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+	std::vector<std::thread> drivers;
+	for (unsigned d = 0; d < 2; ++d)
 	{
-		if (std::chrono::steady_clock::now() > deadline)
+		drivers.emplace_back([&, d]
 		{
-			std::fprintf(stderr, "timeout waiting for parks (%u/%u) ran=%u\n",
-				g_parks.load(), n, g_ran.load());
-			return 1;
-		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			unsigned spins = 0;
+			while (g_done.load() < n_fibers + 1 && std::chrono::steady_clock::now() < deadline)
+			{
+				for (unsigned i = d; i < n_fibers; i += 2)
+				{
+					unsigned v = pps[i].turn.load();
+					if ((v & 1) && pps[i].turn.compare_exchange_strong(v, v + 1))
+						sched.wake(*pps[i].task);
+				}
+				if (++spins % 128 == 0)
+					std::this_thread::yield();
+			}
+		});
 	}
+	for (auto& t : drivers)
+		t.join();
 
-	for (auto* t : tasks)
-		sched.requeue(*t);
-
-	while (g_ran.load() < n * 2)
+	if (g_done.load() < n_fibers + 1)
 	{
-		if (std::chrono::steady_clock::now() > deadline)
-		{
-			std::fprintf(stderr, "timeout waiting for completion ran=%u\n", g_ran.load());
-			return 1;
-		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		std::fprintf(stderr, "timeout: done=%u/%u parks=%llu wakes=%llu\n", g_done.load(), n_fibers + 1,
+			static_cast<unsigned long long>(sched.park_count()), static_cast<unsigned long long>(sched.wake_count()));
+		for (auto& pp : pps)
+			std::fprintf(stderr, "  fiber %u turn=%u parked=%d\n", pp.id, pp.turn.load(), pp.task->parked() ? 1 : 0);
+		return 1;
 	}
-
+	CHECK(g_tls_bad.load() == 0);
+	CHECK(g_timed_elapsed.load() >= 20'000'000);
+	CHECK(g_timed_elapsed.load() < 200'000'000);
+	CHECK(sched.timeout_count() >= 1);
 	sched.stop();
 	sched.join();
-	assert(sched.ran_count() > 0);
-	std::printf("Cell PPU dispatch fixture: fibers=%u parks=%u scheduler_ran=%llu yields=%llu\n",
-		n, g_parks.load(),
-		static_cast<unsigned long long>(sched.ran_count()),
-		static_cast<unsigned long long>(sched.yield_count()));
+	std::printf("Cell PPU dispatch fixture: fibers=%u rounds=%u parks=%llu wakes=%llu timeouts=%llu timed=%.1fms ran=%llu tls_ok\n",
+		n_fibers, n_rounds,
+		static_cast<unsigned long long>(sched.park_count()),
+		static_cast<unsigned long long>(sched.wake_count()),
+		static_cast<unsigned long long>(sched.timeout_count()),
+		g_timed_elapsed.load() / 1e6,
+		static_cast<unsigned long long>(sched.ran_count()));
 	return 0;
 }

@@ -1,3 +1,4 @@
+#include "Utilities/CellFiberTls.h"
 #include "stdafx.h"
 #include "Utilities/Cell.h"
 #include "Emu/System.h"
@@ -1726,6 +1727,16 @@ DECLARE(lv2_obj::g_priority_order_tag){};
 thread_local DECLARE(lv2_obj::g_to_notify){};
 thread_local DECLARE(lv2_obj::g_postpone_notify_barrier){};
 thread_local DECLARE(lv2_obj::g_to_awake);
+
+bool lv2_obj::register_cell_fiber_tls()
+{
+	CELL_FIBER_TLS_EXPR(g_to_notify);
+	CELL_FIBER_TLS_EXPR(g_postpone_notify_barrier);
+	CELL_FIBER_TLS_EXPR(g_to_awake);
+	return true;
+}
+
+[[maybe_unused]] static const bool s_cell_fiber_tls_lv2 = lv2_obj::register_cell_fiber_tls();
 
 // Scheduler queue for timeouts (wait until -> thread)
 static std::deque<std::pair<u64, class cpu_thread*>> g_waiting;

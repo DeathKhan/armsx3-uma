@@ -506,6 +506,9 @@ public:
 	// Proirity tags
 	static atomic_t<u64> g_priority_order_tag;
 
+	// Registers the notify batches with cell::fiber_tls (static init).
+	static bool register_cell_fiber_tls();
+
 private:
 	// Pending list of threads to run
 	static thread_local std::vector<class cpu_thread*> g_to_awake;

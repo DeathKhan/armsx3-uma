@@ -7,6 +7,9 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
 
 class thread_base;
 
@@ -35,11 +38,7 @@ public:
 	void pin_hosts_to_upper(std::uint64_t upper_mask);
 
 	// Spawn a guest PPU fiber bound to one host. Returns the fiber task.
-	fiber_task& spawn_guest(thread_base& thread, guest_entry entry);
-
-	// Cooperative wait: park the current fiber until wake_guest.
-	void park_current_for_wait();
-	void wake_guest(thread_base& thread);
+	fiber_task& spawn_guest(thread_base& thread, guest_entry entry, std::string (*describe)(thread_base*) = nullptr);
 
 	std::uint64_t dispatch_count() const noexcept { return m_dispatch.load(std::memory_order_relaxed); }
 
@@ -54,6 +53,21 @@ private:
 		ppu_runtime* runtime = nullptr;
 	};
 	static void guest_work(fiber_task& task, void* p);
+
+	// Stall watchdog: when no fiber has run for a while but guests are live,
+	// log every guest's state, park call chain and dump_misc once per stall.
+	struct guest_rec
+	{
+		fiber_task* task = nullptr;
+		thread_base* thread = nullptr;
+		std::string (*describe)(thread_base*) = nullptr;
+		std::atomic<bool> done{false};
+	};
+	void watchdog_main();
+	void dump_stall(std::uint64_t idle_ms);
+	std::vector<std::unique_ptr<guest_rec>> m_guests;
+	std::thread m_watchdog;
+	std::atomic<bool> m_watchdog_stop{false};
 
 	std::mutex m_mutex;
 	std::unique_ptr<scheduler> m_scheduler;

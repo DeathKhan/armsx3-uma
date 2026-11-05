@@ -1,5 +1,7 @@
 #include "stdafx.h"
 #include "Utilities/Cell.h"
+#include "Utilities/CellFiberTls.h"
+#include "Utilities/CellScheduler.h"
 #include "CPUThread.h"
 #include "CPUDisAsm.h"
 
@@ -39,6 +41,10 @@ static thread_local u64 s_tls_sctr = -1;
 
 extern thread_local void(*g_tls_log_control)(const char* fmt, u64 progress);
 extern thread_local std::string(*g_tls_log_prefix)();
+
+CELL_FIBER_TLS(s_tls_thread_slot);
+CELL_FIBER_TLS(s_tls_sctr);
+CELL_FIBER_TLS(g_tls_log_control);
 
 template <>
 void fmt_class_string<cpu_flag>::format(std::string& out, u64 arg)
@@ -503,6 +509,14 @@ extern f64 get_cpu_program_usage_percent(u64 hash)
 
 thread_local DECLARE(cpu_thread::g_tls_this_thread) = nullptr;
 
+bool cpu_thread::register_cell_fiber_tls()
+{
+	CELL_FIBER_TLS_EXPR(g_tls_this_thread);
+	return true;
+}
+
+[[maybe_unused]] static const bool s_cell_fiber_tls_cpu = cpu_thread::register_cell_fiber_tls();
+
 // Total number of CPU threads
 static atomic_t<u64, 128> s_cpu_counter{0};
 
@@ -691,7 +705,7 @@ void cpu_thread::operator()()
 	// Register thread in g_cpu_array
 	s_cpu_counter++;
 
-	static thread_local struct thread_cleanup_t
+	struct thread_cleanup_t
 	{
 		cpu_thread* _this = nullptr;
 		std::string(*log_prefix)() = nullptr;
@@ -732,7 +746,13 @@ void cpu_thread::operator()()
 		{
 			cleanup();
 		}
-	} cleanup;
+	};
+
+	// Native threads keep the cleanup until thread exit; a guest fiber shares its
+	// host's thread_locals with other guests, so it owns a frame-local one.
+	static thread_local thread_cleanup_t s_tls_cleanup;
+	thread_cleanup_t fiber_cleanup;
+	thread_cleanup_t& cleanup = cell::scheduler::current_task() ? fiber_cleanup : s_tls_cleanup;
 
 	cleanup._this = this;
 	cleanup.log_prefix = old_prefix;
@@ -1463,6 +1483,13 @@ bool cpu_thread::suspend_work::push(cpu_thread* _this) noexcept
 			if (!copy)
 			{
 				break;
+			}
+
+			if (auto* fiber = cell::scheduler::current_task())
+			{
+				// Guests queued on this host can only acknowledge when it runs them.
+				fiber->yield();
+				continue;
 			}
 
 			utils::pause();

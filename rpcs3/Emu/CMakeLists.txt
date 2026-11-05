@@ -109,6 +109,15 @@ set_source_files_properties("../../Utilities/JITLLVM.cpp" "../../Utilities/JITAS
     SKIP_PRECOMPILE_HEADERS ON
 )
 
+set_source_files_properties(
+    "../../Utilities/CellFiber.cpp"
+    "../../Utilities/CellScheduler.cpp"
+    "../../Utilities/CellPpuRuntime.cpp"
+    PROPERTIES
+    COMPILE_FLAGS "$<IF:$<CXX_COMPILER_ID:MSVC>,/EHsc,-fexceptions>"
+    SKIP_PRECOMPILE_HEADERS ON
+)
+
 set_source_files_properties("../util/yaml.cpp" PROPERTIES
     COMPILE_FLAGS "$<IF:$<CXX_COMPILER_ID:MSVC>,/EHsc,-fexceptions>"
     SKIP_PRECOMPILE_HEADERS ON

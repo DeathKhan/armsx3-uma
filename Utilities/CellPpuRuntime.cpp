@@ -2,8 +2,6 @@
 
 #include "util/logs.hpp"
 
-#include <pthread.h>
-
 #if defined(__linux__)
 #include <sched.h>
 #endif
@@ -25,8 +23,9 @@ void pin_work(fiber_task& task, void* p)
 #if defined(__linux__)
 	cpu_set_t set;
 	CPU_ZERO(&set);
-	CPU_SET(a->cpu, &set);
-	pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+	CPU_SET(static_cast<int>(a->cpu), &set);
+	// bionic has sched_setaffinity; pthread_setaffinity_np is glibc-only.
+	sched_setaffinity(0, sizeof(set), &set);
 #endif
 	cell_fiber.notice("ARMSX3_CELL fiber host pinned cpu=%u", a->cpu);
 	delete a;

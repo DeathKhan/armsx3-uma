@@ -10,6 +10,7 @@
 #include "Emu/system_config.h"
 #include "Thread.h"
 #include "Cell.h"
+#include "CellPpuRuntime.h"
 #include <atomic>
 #include <bit>
 #include <cstring>

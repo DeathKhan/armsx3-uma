@@ -67,6 +67,7 @@ public:
 
 	std::uint64_t ran_count() const noexcept { return m_ran.load(std::memory_order_relaxed); }
 	std::uint64_t yield_count() const noexcept { return m_yields.load(std::memory_order_relaxed); }
+	static fiber_task* current_task() noexcept { return t_current; }
 
 private:
 	friend class fiber_task;

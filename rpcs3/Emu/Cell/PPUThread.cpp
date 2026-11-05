@@ -47,6 +47,31 @@
 #include <llvm/Analysis/LoopAnalysisManager.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Transforms/Scalar/EarlyCSE.h>
+#include "Utilities/Cell.h"
+#include <llvm/Transforms/Scalar/ADCE.h>
+#include <llvm/Transforms/Scalar/DeadStoreElimination.h>
+#include <llvm/Transforms/Scalar/LICM.h>
+#include <llvm/Transforms/Scalar/LoopPassManager.h>
+#include <llvm/Transforms/Scalar/SimplifyCFG.h>
+#include <llvm/Transforms/InstCombine/InstCombine.h>
+
+// PPU LLVM pass level. 0: none on ARM64 (x64 keeps EarlyCSE, as upstream), 1: EarlyCSE,
+// 2: the SPU recompiler's pipeline (EarlyCSE, SimplifyCFG, InstCombine, DSE, LICM, ADCE).
+// Cell-on-Oryon (ARMSX3_CELL=1) defaults to 2; ARMSX3_PPU_OPT (driver_env.txt) overrides either
+// way. Folded into the cached object name, so each level keeps its own objects. Read lazily:
+// PPU modules compile after driver_env has been applied.
+static u32 ppu_opt_level()
+{
+	static const u32 level = []
+	{
+		if (const char* e = std::getenv("ARMSX3_PPU_OPT"); e && *e)
+		{
+			return std::min<u32>(static_cast<u32>(std::atoi(e)), 2);
+		}
+		return cell::enabled() ? 2u : 0u;
+	}();
+	return level;
+}
 #ifdef _MSC_VER
 #pragma warning(pop)
 #else
@@ -6619,7 +6644,8 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 				settings += ppu_settings::daz_and_ftz;
 
 			// Write version, hash, CPU, settings
-			fmt::append(obj_name, "v9-kusa-%s-%s-%s.obj", fmt::base57(output, 16), fmt::base57(settings), jit_compiler::cpu(g_cfg.core.llvm_cpu.to_string()));
+			fmt::append(obj_name, "v9-kusa-%s-%s-%s%s.obj", fmt::base57(output, 16), fmt::base57(settings), jit_compiler::cpu(g_cfg.core.llvm_cpu.to_string()),
+				ppu_opt_level() ? fmt::format("-opt%u", ppu_opt_level()) : "");
 		}
 
 		if (cpu ? cpu->state.all_of(cpu_flag::exit) : Emu.IsStopped())
@@ -7525,6 +7551,19 @@ static bool ppu_initialize2(jit_compiler& jit, const ppu_module<lv2_obj>& module
 		FunctionPassManager fpm;
 		// Basic optimizations
 		fpm.addPass(EarlyCSEPass());
+		if (ppu_opt_level() >= 2)
+		{
+			fpm.addPass(SimplifyCFGPass());
+			fpm.addPass(InstCombinePass());
+			fpm.addPass(DSEPass());
+			fpm.addPass(createFunctionToLoopPassAdaptor(LICMPass(LICMOptions()), true));
+			fpm.addPass(ADCEPass());
+		}
+#ifdef ARCH_X64
+		const bool run_passes = true;
+#else
+		const bool run_passes = ppu_opt_level() > 0;
+#endif
 
 		u32 guest_code_size = 0;
 		u32 min_addr = umax;
@@ -7556,10 +7595,11 @@ static bool ppu_initialize2(jit_compiler& jit, const ppu_module<lv2_obj>& module
 				// Translate
 				if ([[maybe_unused]] const auto func = translator.Translate(mod_func))
 				{
-#ifdef ARCH_X64 // TODO
 					// Run optimization passes
-					fpm.run(*func, fam);
-#endif // ARCH_X64
+					if (run_passes)
+					{
+						fpm.run(*func, fam);
+					}
 				}
 				else
 				{
@@ -7574,10 +7614,11 @@ static bool ppu_initialize2(jit_compiler& jit, const ppu_module<lv2_obj>& module
 		{
 			if ([[maybe_unused]] const auto func = translator.GetSymbolResolver(module_part))
 			{
-#ifdef ARCH_X64 // TODO
 				// Run optimization passes
-				fpm.run(*func, fam);
-#endif // ARCH_X64
+				if (run_passes)
+				{
+					fpm.run(*func, fam);
+				}
 			}
 			else
 			{

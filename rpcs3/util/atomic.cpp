@@ -1128,6 +1128,7 @@ atomic_wait_engine::wait(const void* data, u32 old_value, u64 timeout, atomic_wa
 				if (cell_noop_streak >= 8 || cell_immediate_wakes >= 32)
 				{
 					cond->cell_wait.handoff_to_native();
+					cell::disable_wfe(); // process-wide: stop paying WFE entry tax every wait
 					cell_noop_streak = 0;
 				}
 				else if (!s_tls_wait_cb(data, ++attempts, stamp0))

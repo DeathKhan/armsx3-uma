@@ -55,10 +55,24 @@ public:
 	scoped_native_wait& operator=(const scoped_native_wait&) = delete;
 };
 
+// Set when Oryon WFE proves to be a no-op spin on this boot (sticky event latch).
+// Subsequent waits skip the WFE budget and go straight to futex.
+inline std::atomic<bool>& wfe_disabled()
+{
+	static std::atomic<bool> disabled{false};
+	return disabled;
+}
+
+inline void disable_wfe()
+{
+	wfe_disabled().store(true, std::memory_order_relaxed);
+}
+
 inline bool event_wait_enabled(std::uint64_t timeout_ns, bool event_stream)
 {
 	// A sub-200 us timeout cannot absorb the periodic event stream's wake bound.
-	return waiter_enabled() && enabled() && event_stream && timeout_ns >= 200'000;
+	return waiter_enabled() && enabled() && event_stream && timeout_ns >= 200'000
+		&& !wfe_disabled().load(std::memory_order_relaxed);
 }
 
 struct topology

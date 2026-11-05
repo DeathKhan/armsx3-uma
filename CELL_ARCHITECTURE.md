@@ -116,14 +116,36 @@ Initial device observations: installed package `com.armsx3.uma`, version
 The historical `l307-final` uses another APK (`a5acb5d102890d51…`); it is context,
 not a same-day control for this candidate.
 
-| Measure | Historical l307-final | Same-day release | Combined CELL build |
+| Measure | Historical l307-final | CELL phase1 (WFE spin) | CELL phase1+WFE latch (`7b5042426`) |
 | --- | ---: | ---: | ---: |
-| Mcycles/frame |169|Pending|Pending|
-| Busy CPU cores |1.91|Pending|Pending|
-| Late frames |0|Pending|Pending|
-| Per-thread syscalls/s |Not recorded here|Pending|Pending|
-| Unplugged watts |Not recorded here|Pending|Pending|
-| Hottest cpu/cpuss temperature |Not recorded here|Pending|Pending|
+| Mcycles/frame | 169 | 773–951 | **152** (ax3a/ax3b) |
+| Busy CPU cores | 1.91 | 5.6–6.4 | **2.30–2.32** |
+| Late frames | 0 | many | **0** |
+| Locked fps | 30 | ~21 (v1) / 30 | **30.00** |
+| Hottest cpu/cpuss °C | n/a | ~72–86 | **~60–61** |
+| SPU core busy each | ~0.3 | ~0.9 | **~0.34–0.35** |
+
+### Phase1 wait primitive — Odin evidence (2026-11-05 CST)
+
+Topology markers confirmed on device: `SPU/helpers=0x3f PPU/RSX=0xc0` (uclamp errno 1).
+LBP Sackboy on-stage screenshots for ax3 walks. APK `phase1-wfe-7b5042426.apk`
+sha256 `ebc62479092bbaec610b5be27f09c48e26f85f167004fe67cc368d706e766747`.
+
+Oryon WFE without an exclusive monitor returns immediately when the event latch is
+already set. Burning the 3 ms budget spun ~0.9 core/SPU. Commits:
+- `877276e5c` early futex after immediate WFEs (1 µs floor; did not trip)
+- `a5c78324b` 50 µs floor + 8-noop/32-attempt caps → ~545 Mc/f
+- `7b5042426` process-wide `wfe_disabled` after first noop handoff → **152 Mc/f**
+
+WFE remains available until the first noop streak; afterward waits are futex-only
+for that boot. That is the phase1 wait contract on this CPU until a non-sticky
+event path exists.
+
+Ratchet & Clank: SIGSEGV in SPU LLVM `verifyModule` on phase1 APK with CELL=0/1 and
+on the same-day release APK control (`cell-p0-ratchet-release` dead before 90s). Not
+treated as a CELL regression. Savestate / applet exits / 10 boot loops still open.
+Fiber runtime integration still blocked on completing those correctness items;
+fiber *foundation* remains at `4e9f555fa` / `CELL_FIBER_AUDIT.md`.
 
 Run the release and combined candidate at least twice each, same scene and day.
 Use `/data/local/tmp/bench/bench_ax3.sh com.armsx3.uma <run> 90`, inspect screenshots

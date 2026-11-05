@@ -10,8 +10,8 @@ correctness, not independent performance justifications.
 
 | Checkpoint | Source state | Required game gate |
 | --- | --- | --- |
-| Topology and registered waits | Implemented; full Android build in progress | LittleBigPlanet and Ratchet correctness pending |
-| Two-host PPU fibers | Guarded stack/context primitive tested separately; runtime integration pending | Not started |
+| Topology and registered waits | Implemented in APK `phase1-48770e496` (sha256 `9c51e96e…`); installed on Odin 2026-11-05 | LBP reached playable Sackboy stage with `ARMSX3_CELL=1`; topology `SPU/helpers=0x3f PPU/RSX=0xc0`; uclamp unavailable (errno 1, non-fatal). Walk bench and Ratchet still pending in this session. |
+| Two-host PPU fibers | Guarded `CellFiber` + isolated `CellScheduler` host fixtures pass on Arch; not in Android CMake/runtime | Not started |
 | Host-order managed-SPU local store | Complete accessor audit and architecture-contract tests; conversion pending | Not started |
 | PPU optimization and huge-page layout | Design audit pending; production path unchanged | Not started |
 | Integration | Pending | 1,200 current-LLVM replay vectors, game/savestate/exit tests and 10 boot loops |

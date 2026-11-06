@@ -534,7 +534,8 @@ bool lv2_socket_p2ps::handle_connected(p2ps_encapsulated_tcp* tcp_header, u8* da
 
 bool lv2_socket_p2ps::handle_listening(p2ps_encapsulated_tcp* tcp_header, [[maybe_unused]] u8* data, ::sockaddr_storage* op_addr)
 {
-	std::lock_guard lock(mutex);
+	// Unlocked around idm::import_existing below: see there.
+	std::unique_lock lock(mutex);
 
 	if (status != p2ps_stream_status::stream_listening)
 	{
@@ -576,7 +577,24 @@ bool lv2_socket_p2ps::handle_listening(p2ps_encapsulated_tcp* tcp_header, [[mayb
 		const u64 new_cur_seq      = send_hdr.seq + 1;
 		const u64 new_data_beg_seq = send_hdr.ack;
 		auto sock_lv2 = make_shared<lv2_socket_p2ps>(native_socket, port, vport, new_op_addr, new_op_port, new_op_vport, new_cur_seq, new_data_beg_seq, so_nbio, so_rcvbuf);
-		const s32 new_sock_id      = idm::import_existing<lv2_socket>(sock_lv2);
+
+		// Registering the new socket takes the id_manager writer lock, while sys_net_bnet_select
+		// (and anything else under idm::select) holds an idm reader and then locks each socket's
+		// mutex. Holding this socket's mutex across import_existing deadlocked the two: the P2P
+		// thread waiting for idm, select waiting for this mutex, every PPU thread behind them.
+		// LittleBigPlanet hit it during boot. Register unlocked, then re-check the state.
+		lock.unlock();
+		const s32 new_sock_id = idm::import_existing<lv2_socket>(sock_lv2);
+		lock.lock();
+
+		if (status != p2ps_stream_status::stream_listening)
+		{
+			// Stopped listening meanwhile: nobody will accept it
+			lock.unlock();
+			idm::remove<lv2_socket>(new_sock_id);
+			return true;
+		}
+
 		sock_lv2->set_lv2_id(new_sock_id);
 		const u64 key_connected = (reinterpret_cast<struct sockaddr_in*>(op_addr)->sin_addr.s_addr) | (static_cast<u64>(tcp_header->src_port) << 48) | (static_cast<u64>(tcp_header->dst_port) << 32);
 

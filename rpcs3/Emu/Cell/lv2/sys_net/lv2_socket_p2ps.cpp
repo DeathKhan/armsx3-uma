@@ -102,6 +102,23 @@ public:
 
 			std::vector<s32> streams_to_close;
 
+			// Resends are decided under data_mutex but performed after releasing it. Sending needs
+			// idm::check (the id_manager reader lock), and the P2P receive path takes the locks in
+			// the opposite order: idm::check -> socket mutex -> confirm_data_received ->
+			// data_mutex. Two readers would not block each other, but id_manager's lock prefers
+			// writers, so one object destroy (sys_semaphore_destroy, say) queued in between left
+			// this thread waiting for idm, the P2P thread waiting for data_mutex, the writer
+			// waiting for the P2P thread's read lock -- and every PPU thread that touched the
+			// network or idm behind them. LittleBigPlanet froze that way a few minutes in.
+			struct resend
+			{
+				s32 sock_id;
+				::sockaddr_in dst_addr;
+				std::vector<u8> data;
+				u64 seq;
+			};
+			std::vector<resend> to_resend;
+
 			{
 				std::lock_guard lock(data_mutex);
 
@@ -136,33 +153,8 @@ public:
 						continue;
 					}
 
-					// resend the message
-					const auto res = idm::check<lv2_socket>(msg.sock_id, [&](lv2_socket& sock) -> bool
-						{
-							ensure(sock.get_type() == SYS_NET_SOCK_STREAM_P2P);
-							auto& sock_p2ps = reinterpret_cast<lv2_socket_p2ps&>(sock);
-
-							while (np::sendto_possibly_ipv6(sock_p2ps.get_socket(), reinterpret_cast<const char*>(msg.data.data()), ::size32(msg.data), &msg.dst_addr, 0) == -1)
-							{
-								const sys_net_error err = get_last_error(false);
-								// concurrency on the socket(from a sendto for example) can result in EAGAIN error in which case we try again
-								if (err == SYS_NET_EAGAIN)
-								{
-									continue;
-								}
-
-								sys_net.error("[P2PS] Resending the packet failed(%s), closing the stream", err);
-								streams_to_close.push_back(msg.sock_id);
-								return false;
-							}
-							return true;
-						});
-
-					if (!res || !res.ret)
-					{
-						it = msgs.erase(it);
-						continue;
-					}
+					// Resend after releasing data_mutex (see above); a failed send removes it then
+					to_resend.push_back(resend{msg.sock_id, msg.dst_addr, msg.data, msg.seq});
 
 					// Update key timeout
 					msgs.insert(std::make_pair(now + rtt.rtt_time, std::move(msg)));
@@ -185,6 +177,45 @@ public:
 				else
 				{
 					timeout = atomic_wait_timeout::inf;
+				}
+			}
+
+			for (const auto& r : to_resend)
+			{
+				const auto res = idm::check<lv2_socket>(r.sock_id, [&](lv2_socket& sock) -> bool
+					{
+						ensure(sock.get_type() == SYS_NET_SOCK_STREAM_P2P);
+						auto& sock_p2ps = reinterpret_cast<lv2_socket_p2ps&>(sock);
+
+						while (np::sendto_possibly_ipv6(sock_p2ps.get_socket(), reinterpret_cast<const char*>(r.data.data()), ::size32(r.data), &r.dst_addr, 0) == -1)
+						{
+							const sys_net_error err = get_last_error(false);
+							// concurrency on the socket(from a sendto for example) can result in EAGAIN error in which case we try again
+							if (err == SYS_NET_EAGAIN)
+							{
+								continue;
+							}
+
+							sys_net.error("[P2PS] Resending the packet failed(%s), closing the stream", err);
+							streams_to_close.push_back(r.sock_id);
+							return false;
+						}
+						return true;
+					});
+
+				if (!res || !res.ret)
+				{
+					// As before: a message that could not be resent is dropped
+					std::lock_guard lock(data_mutex);
+
+					for (auto it = msgs.begin(); it != msgs.end(); it++)
+					{
+						if (it->second.sock_id == r.sock_id && it->second.seq == r.seq)
+						{
+							msgs.erase(it);
+							break;
+						}
+					}
 				}
 			}
 

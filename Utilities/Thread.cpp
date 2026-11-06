@@ -3164,6 +3164,14 @@ static struct ::sigaction s_prev_fault_action[NSIG]{};
 // Everything else is somebody else's fault, in both senses.
 static bool is_emulator_fault(void* addr)
 {
+	// Before the guest regions exist every offset below is relative to null, so any low address
+	// -- an implicit null check in ART-compiled Java, a MediaPlayer callback during startup --
+	// looked like guest memory and the app died instead of forwarding the fault.
+	if (!vm::g_base_addr || !vm::g_exec_addr)
+	{
+		return false;
+	}
+
 	const u64 exec64 = (reinterpret_cast<u64>(addr) - reinterpret_cast<u64>(vm::g_exec_addr)) / 2;
 	const u64 seg_off = (reinterpret_cast<u64>(addr) - reinterpret_cast<u64>(vm::g_exec_addr)) - vm::g_exec_addr_seg_offset;
 

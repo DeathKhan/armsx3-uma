@@ -9255,20 +9255,23 @@ public:
 					return eval(a * b);
 				}
 
+				// A zero operand forces +0 (0 * inf would be NaN on the host, and 0 * -x is -0).
+				// Selected as "zero ? +0 : product" -- the same bits as masking the product with
+				// "nonzero or NaN" for each operand, but AArch64 lowers it to FCMEQ/ORR/BIC instead
+				// of FCMEQ/MVN/BIC/AND: one instruction less per multiply, and FM/FMA dominate the
+				// float-heavy SPU jobs (a third of the hottest LittleBigPlanet job was this masking).
 				if (a_notnan)
 				{
-					const auto ma = sext<s32[4]>(fcmp_uno(a != fsplat<f32[4]>(0.)));
-					return eval(bitcast<f32[4]>(bitcast<s32[4]>(a * b) & ma));
+					return eval(select(fcmp_ord(a == fsplat<f32[4]>(0.)), fsplat<f32[4]>(0.), a * b));
 				}
 				else if (b_notnan)
 				{
-					const auto mb = sext<s32[4]>(fcmp_uno(b != fsplat<f32[4]>(0.)));
-					return eval(bitcast<f32[4]>(bitcast<s32[4]>(a * b) & mb));
+					return eval(select(fcmp_ord(b == fsplat<f32[4]>(0.)), fsplat<f32[4]>(0.), a * b));
 				}
 
-				const auto ma = sext<s32[4]>(fcmp_uno(a != fsplat<f32[4]>(0.)));
-				const auto mb = sext<s32[4]>(fcmp_uno(b != fsplat<f32[4]>(0.)));
-				return eval(bitcast<f32[4]>(bitcast<s32[4]>(a * b) & ma & mb));
+				const auto za = fcmp_ord(a == fsplat<f32[4]>(0.));
+				const auto zb = fcmp_ord(b == fsplat<f32[4]>(0.));
+				return eval(select(za | zb, fsplat<f32[4]>(0.), a * b));
 			}
 			else
 			{
@@ -9633,15 +9636,16 @@ public:
 					return fma32x4(a, b, c, a_known, b_known);
 				}
 
+				// "zero multiplier ? c : fma", the complement of the old "nonzero or NaN" test (see FM)
 				if (a_notnan)
 				{
 					const auto normal_fma = fma32x4(a, b, c, a_known, b_known);
-					return eval(select(fcmp_uno(a != fsplat<f32[4]>(0.)), normal_fma, c));
+					return eval(select(fcmp_ord(a == fsplat<f32[4]>(0.)), c, normal_fma));
 				}
 				else if (b_notnan)
 				{
 					const auto normal_fma = fma32x4(a, b, c, a_known, b_known);
-					return eval(select(fcmp_uno(b != fsplat<f32[4]>(0.)), normal_fma, c));
+					return eval(select(fcmp_ord(b == fsplat<f32[4]>(0.)), c, normal_fma));
 				}
 
 #ifdef ARCH_X64
@@ -9656,9 +9660,9 @@ public:
 #endif
 
 				const auto normal_fma = fma32x4(a, b, c, a_known, b_known);
-				const auto a_cmp = fcmp_uno(a != fsplat<f32[4]>(0.));
-				const auto b_cmp = fcmp_uno(b != fsplat<f32[4]>(0.));
-				return eval(select(a_cmp & b_cmp, normal_fma, c));
+				const auto za = fcmp_ord(a == fsplat<f32[4]>(0.));
+				const auto zb = fcmp_ord(b == fsplat<f32[4]>(0.));
+				return eval(select(za | zb, c, normal_fma));
 			}
 			else
 			{

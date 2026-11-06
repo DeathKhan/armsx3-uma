@@ -44,6 +44,11 @@ LOG_CHANNEL(jit_log, "JIT");
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/TargetParser/Host.h"
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
+#include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/IR/DiagnosticPrinter.h"
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #include "llvm/ExecutionEngine/RTDyldMemoryManager.h"
 #include "llvm/ExecutionEngine/ObjectCache.h"
 #include "llvm/ExecutionEngine/JITEventListener.h"
@@ -885,6 +890,36 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, st
 	: m_context(new llvm::LLVMContext)
 	, m_cpu(cpu(_cpu))
 {
+	// Backend/MC errors (an out-of-range fixup, an invalid relocation) are reported through
+	// the context diagnostic handler, whose default prints to stderr -- /dev/null in an
+	// Android app -- and calls exit(): the app vanished with a teardown crash and no reason.
+	// Log the text, then take the same recoverable/fatal path as the fatal handler.
+	m_context->setDiagnosticHandlerCallBack([](const llvm::DiagnosticInfo* di, void*)
+	{
+		if (di->getSeverity() != llvm::DS_Error)
+		{
+			return;
+		}
+
+		std::string text;
+		llvm::raw_string_ostream os(text);
+		llvm::DiagnosticPrinterRawOStream printer(os);
+		di->print(printer);
+		os.flush();
+#ifdef __ANDROID__
+		__android_log_write(ANDROID_LOG_FATAL, "ARMSX3", ("LLVM backend error: " + text).c_str());
+#endif
+		jit_log.fatal("LLVM backend error: %s", text);
+
+		if (g_llvm_fatal_message)
+		{
+			*g_llvm_fatal_message = text;
+			thread_ctrl::silent_exit();
+		}
+
+		fmt::throw_exception("LLVM backend error: %s", text);
+	}, nullptr);
+
 	[[maybe_unused]] static const bool s_install_llvm_error_handler = []()
 	{
 		llvm::remove_fatal_error_handler();

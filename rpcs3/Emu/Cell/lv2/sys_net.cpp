@@ -2,6 +2,7 @@
 #include "sys_net.h"
 
 #include "Emu/IdManager.h"
+#include "Emu/System.h"
 #include "Emu/Cell/PPUThread.h"
 #include "Utilities/Thread.h"
 
@@ -2075,4 +2076,50 @@ error_code sys_net_eurus_post_command(ppu_thread& ppu, s32 arg1, u32 arg2, u32 a
 
 	sys_net.todo("sys_net_eurus_post_command(%d, 0x%x, 0x%x)", arg1, arg2, arg3);
 	return CELL_OK;
+}
+
+// Fiber stall watchdog (Utilities/CellPpuRuntime.cpp): name a wait word that is a known emulator
+// lock. Diagnostics only: runs while every guest is stalled, so it must not take idm or lv2
+// locks itself (sockets are found with the unlocked id scan).
+extern const void* p2ps_tcpm_data_mutex_addr();
+
+std::string cell_fiber_name_address(const void* addr)
+{
+	if (!addr) return {};
+	if (addr == &id_manager::g_mutex) return "idm::g_mutex";
+	if (addr == &lv2_obj::g_mutex) return "lv2_obj::g_mutex";
+
+	if (auto* nc = g_fxo->try_get<network_context>())
+	{
+		if (addr == &nc->mutex_thread_loop) return "network.mutex_thread_loop";
+		if (addr == &nc->mutex_ppu_to_awake) return "network.mutex_ppu_to_awake";
+	}
+
+	if (auto* pc = g_fxo->try_get<p2p_context>())
+	{
+		if (addr == &pc->mutex_thread_loop) return "p2p.mutex_thread_loop";
+		if (addr == &pc->mutex_ppu_to_awake) return "p2p.mutex_ppu_to_awake";
+		if (addr == &pc->list_p2p_ports_mutex) return "p2p.list_p2p_ports_mutex";
+	}
+
+	if (addr == p2ps_tcpm_data_mutex_addr()) return "p2ps.tcp_timeout_monitor.data_mutex";
+
+	for (u32 i = 0; i < 1024; i++)
+	{
+		const u32 id = (lv2_socket::id_base & -1024) + i;
+
+		if (auto sock = idm::check_unlocked<lv2_socket>(id); sock && addr == sock->mutex_addr())
+		{
+			return fmt::format("socket 0x%x mutex (type %d)", id, static_cast<s32>(sock->get_type()));
+		}
+	}
+
+	return {};
+}
+
+// Fiber stall watchdog: a paused emulator (app in background, screen off, user pause) parks
+// every guest on purpose -- that is not a stall.
+bool cell_fiber_emu_paused()
+{
+	return Emu.IsPaused() || !Emu.IsRunning();
 }

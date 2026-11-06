@@ -17,6 +17,10 @@
 
 LOG_CHANNEL(cell_fiber);
 
+// Names a wait word that is a known emulator lock (rpcs3/Emu/Cell/lv2/sys_net.cpp).
+std::string cell_fiber_name_address(const void* addr);
+bool cell_fiber_emu_paused();
+
 namespace cell
 {
 namespace
@@ -123,7 +127,7 @@ void ppu_runtime::watchdog_main()
 		if (!m_scheduler)
 			continue;
 		const auto ran = m_scheduler->ran_count();
-		idle_s = ran == last_ran ? idle_s + 1 : 0;
+		idle_s = ran == last_ran && !::cell_fiber_emu_paused() ? idle_s + 1 : 0;
 		last_ran = ran;
 		bool live = false;
 		for (auto& g : m_guests)
@@ -172,6 +176,11 @@ void ppu_runtime::dump_stall(std::uint64_t idle_ms)
 		std::string wait;
 		if (const void* data = task->wait_data())
 		{
+			if (std::string name = ::cell_fiber_name_address(data); !name.empty())
+			{
+				wait += " lock=" + name;
+			}
+
 			// Guest/emulator words stay mapped while their waiter is alive.
 			const u32 cur = static_cast<const std::atomic<u32>*>(data)->load();
 			const u32 sync = task->wait_sync() ? task->wait_sync()->load() : 0xffffffffu;

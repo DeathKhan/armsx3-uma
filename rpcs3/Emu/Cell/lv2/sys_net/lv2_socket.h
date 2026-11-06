@@ -143,6 +143,12 @@ protected:
 	shared_mutex mutex;
 	s32 lv2_id = 0;
 
+public:
+	// Diagnostics (fiber stall watchdog lock names)
+	const void* mutex_addr() const { return &mutex; }
+
+protected:
+
 	socket_type native_socket = 0;
 
 	lv2_socket_family family{};

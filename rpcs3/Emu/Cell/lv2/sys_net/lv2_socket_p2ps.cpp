@@ -241,6 +241,9 @@ public:
 public:
 	static constexpr auto thread_name = "Tcp Over Udp Timeout Manager Thread"sv;
 
+	// Diagnostics (fiber stall watchdog lock names)
+	const void* data_mutex_addr() const { return &data_mutex; }
+
 private:
 	atomic_t<u32> wakey = 0;
 	shared_mutex data_mutex;
@@ -262,6 +265,17 @@ private:
 	};
 	std::unordered_map<s32, rtt_info> rtts; // (sock_id, rtt)
 };
+
+// Fiber stall watchdog: the P2PS timeout monitor's data_mutex, if the monitor exists.
+const void* p2ps_tcpm_data_mutex_addr()
+{
+	if (auto* tcpm = g_fxo->try_get<named_thread<tcp_timeout_monitor>>())
+	{
+		return tcpm->data_mutex_addr();
+	}
+
+	return nullptr;
+}
 
 u16 u2s_tcp_checksum(const le_t<u16>* buffer, usz size)
 {
